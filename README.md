@@ -1,67 +1,111 @@
-# Campus Claim (DSCE)
+# DSCE Place
 
-**Paper.io-inspired multiplayer** on the Dayananda Sagar College of Engineering campus map.
+Collaborative real-time pixel canvas over **Dayananda Sagar College of Engineering** (Kumaraswamy Layout, Bengaluru) — like r/place on a campus satellite map.
 
-Walk around campus (GPS) or drag on desktop, leave a **trail**, loop back to your land to **claim territory**, and **cut other players’ trails** to eliminate them.
+## Features
 
-## How to play
+- **Satellite campus background** (DSCE / Kumaraswamy Layout)
+- **200×200 pixel grid** anyone can paint
+- **Real-time sync** via Socket.IO (all users see pixels instantly)
+- **Name only** — no account; name is saved in the browser
+- **★ Star bank** — 30 stars per IP; paint costs 1; +1 star every 30s (regen starts the moment you paint)
+- **GPS “you are here”** — maps phone location onto the campus grid (approximate; tune bounds)
+- **Persistent canvas** — pixels in `data/pixels.json`, quotas in `data/quotas.json`
 
-1. Enter a callsign and drop in — you spawn with a small colored base.
-2. **Move**
-   - **Phone:** tap **GPS** and walk on campus (HTTPS required).
-   - **Desktop:** **Walk** mode + drag on the map (for testing).
-3. Outside your color = you leave a **trail**.
-4. Return to your territory to **close the loop** and claim the enclosed area.
-5. Cross another player’s trail → **they die** (you get a kill). They get a “cut your trail” message.
-6. Hit **your own** trail → you die.
-7. Respawn after a few seconds and fight for campus %.
-
-## Controls (HUD)
-
-| Control | Action |
-|--------|--------|
-| **GPS** | Enable location + center on you |
-| **Walk / Pan** | Walk moves you; Pan only moves the camera |
-| **Follow** | Camera sticks to you |
-| Leaderboard | Top territory % |
-| Feed | Joins, claims, cuts, kills |
-
-## Stack
-
-- Next.js + custom Socket.IO server (`server.ts`)
-- Server-authoritative territory grid (200×200)
-- GPS → grid via `CAMPUS_BOUNDS` in `src/lib/config.ts`
-
-## Run locally
+## Quick start
 
 ```bash
+cd dsce-place
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000
+Open [http://localhost:3000](http://localhost:3000).
 
-## Deploy (Railway)
+Share your LAN URL so classmates can join the same live canvas:
 
-Uses `railway.toml`. Build `npm run build`, start `npm start`.  
-Generate a public domain. **HTTPS is required for GPS.**
+```text
+http://YOUR_IP:3000
+```
 
-## Tune map / GPS
+## Scripts
 
-Edit `CAMPUS_BOUNDS` in `src/lib/config.ts` so the artwork matches real lat/lng (north-up). The campus image is illustrative — walk known corners and nudge bounds if the blue GPS ring is off.
+| Command | Description |
+|--------|-------------|
+| `npm run dev` | Dev server (Next.js + Socket.IO) |
+| `npm run build` | Production build |
+| `npm start` | Run production server |
 
-## Game constants
+## How to use
 
-`src/lib/config.ts`:
+1. Enter a display name
+2. Pick a color from the palette
+3. Click the map to place a pixel
+4. Scroll to zoom, drag to pan
+5. Hover a pixel to see who placed it
 
-- `SPAWN_RADIUS` — starting base size  
-- `RESPAWN_SECONDS` — time out after death  
-- `MAX_TRAIL_LENGTH` — anti-abuse cap  
-- `PLAYER_COLORS` — palette  
+## Config
 
-## Roadmap ideas
+Edit `src/lib/config.ts`:
 
-- Share live locations of all players (privacy toggle)
-- Power-ups / safe zones / class buildings as landmarks  
-- Season leaderboard (Postgres)  
-- Multi-point GPS calibration for the art map  
+- `GRID_WIDTH` / `GRID_HEIGHT` — canvas resolution
+- `MAX_STARS` — star bank size (default 30)
+- `REGEN_SECONDS` — seconds to regenerate +1 star (default 30)
+- `COLOR_PALETTE` — allowed colors
+- `CAMPUS_BOUNDS` — geographic notes for the map area
+
+Background image: `public/campus-satellite.jpg`  
+Replace this file with your own campus map (same filename) to change the backdrop.
+
+**GPS / map sync:** edit `CAMPUS_BOUNDS` in `src/lib/config.ts` so the artwork edges match real lat/lng (north-up). Your map art is not a survey photo — walk to the main gate and a far corner and nudge west/east/north/south until the blue dot sits correctly. HTTPS is required for browser GPS (Railway provides this).
+
+**Limits:** tracked by client **IP** (works behind Railway via `X-Forwarded-For`). Changing display name does not reset free pixels or cooldown.
+
+## Stack
+
+- **Next.js** (React + TypeScript + Tailwind)
+- **Socket.IO** for real-time multiplayer
+- **Custom Node server** (`server.ts`) serving Next + WebSockets
+- **JSON file** persistence (easy to swap for Redis/Postgres later)
+
+## Deploy on Railway (recommended)
+
+This app needs **one always-on Node process** (Next.js + Socket.IO). Railway supports that.
+
+### 1. Push to GitHub
+
+```bash
+cd dsce-place
+git add .
+git commit -m "DSCE Place ready for Railway"
+# Create a repo on GitHub, then:
+git remote add origin https://github.com/YOUR_USER/dsce-place.git
+git push -u origin master
+```
+
+### 2. Deploy
+
+1. Go to [railway.app](https://railway.app) → sign in with GitHub  
+2. **New Project** → **Deploy from GitHub repo** → pick `dsce-place`  
+3. Railway should detect Node and use `railway.toml`:
+   - **Build:** `npm run build`
+   - **Start:** `npm start`
+4. Open the service → **Settings** → **Networking** → **Generate Domain**  
+5. Share that `https://….up.railway.app` link with everyone  
+
+No env vars required. Railway sets `PORT` automatically; `server.ts` already uses it.
+
+### 3. Optional: keep pixels across restarts
+
+By default pixels are stored in `data/pixels.json` on the container disk (can reset on redeploy).
+
+To keep them longer:
+
+1. In Railway → your service → **Volumes**  
+2. Mount a volume at `/app/data` (or the app’s `data` folder path Railway shows)  
+3. Redeploy  
+
+### Notes
+
+- Free/trial limits apply — check Railway pricing if traffic is heavy  
+- Serverless hosts (basic Vercel) are **not** a good fit for Socket.IO

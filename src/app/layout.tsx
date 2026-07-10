@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Campus Claim — DSCE Paper.io",
+  title: "DSCE Place — Campus Pixel Canvas",
   description:
-    "Paper.io-inspired multiplayer territory game on Dayananda Sagar College campus. Walk, claim, cut trails.",
+    "Collaborative real-time pixel canvas over Dayananda Sagar College of Engineering, Kumaraswamy Layout.",
 };
 
 export const viewport: Viewport = {
