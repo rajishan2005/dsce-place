@@ -5,7 +5,7 @@ Collaborative real-time pixel canvas over **Dayananda Sagar College of Engineeri
 ## Features
 
 - **Satellite campus background** (DSCE / Kumaraswamy Layout)
-- **200×200 pixel grid** anyone can paint
+- **300×300 pixel grid** anyone can paint
 - **Real-time sync** via Socket.IO (all users see pixels instantly)
 - **Name only** — no account; name is saved in the browser
 - **★ Star bank** — 30 stars per IP; paint costs 1; +1 star every 30s (regen starts the moment you paint)

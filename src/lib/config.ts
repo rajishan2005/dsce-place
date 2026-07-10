@@ -1,7 +1,7 @@
 /** DSCE Place — shared client/server config */
 
-export const GRID_WIDTH = 200;
-export const GRID_HEIGHT = 200;
+export const GRID_WIDTH = 300;
+export const GRID_HEIGHT = 300;
 
 /** Max stars (paint charges) per IP */
 export const MAX_STARS = 30;
