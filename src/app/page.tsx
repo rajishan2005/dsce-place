@@ -35,6 +35,7 @@ export default function Home() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [palette, setPalette] = useState<readonly string[]>(COLOR_PALETTE);
   const [grid, setGrid] = useState({ w: GRID_WIDTH, h: GRID_HEIGHT });
+  const [hudOpen, setHudOpen] = useState(true);
 
   useEffect(() => {
     const saved = localStorage.getItem(NAME_KEY);
@@ -49,7 +50,6 @@ export default function Home() {
     setRegenSeconds(quota.regenSeconds);
   }, []);
 
-  // Local tick: countdown next star; when it hits 0, gain a star (client estimate)
   useEffect(() => {
     if (stars >= maxStars) return;
     const t = setInterval(() => {
@@ -57,7 +57,6 @@ export default function Home() {
         if (s <= 1) {
           setStars((prev) => {
             const next = Math.min(maxStars, prev + 1);
-            // if still not full after this star, restart regen cycle
             if (next < maxStars) {
               queueMicrotask(() => setNextStarIn(regenSeconds));
             } else {
@@ -143,11 +142,7 @@ export default function Home() {
         return;
       }
 
-      // Optimistic: spend star + start/keep regen immediately
-      setStars((prev) => {
-        const next = Math.max(0, prev - 1);
-        return next;
-      });
+      setStars((prev) => Math.max(0, prev - 1));
       setNextStarIn((prev) => (prev > 0 ? prev : regenSeconds));
 
       socket.emit(
@@ -156,16 +151,10 @@ export default function Home() {
         (res: {
           ok?: boolean;
           error?: string;
-          nextStarIn?: number;
-          stars?: number;
           quota?: QuotaUpdate;
-          pixel?: Pixel;
         }) => {
           if (res?.quota) applyQuota(res.quota);
-          if (res?.error) {
-            showToast(res.error);
-            return;
-          }
+          if (res?.error) showToast(res.error);
         }
       );
     },
@@ -173,188 +162,217 @@ export default function Home() {
   );
 
   const canPlace = Boolean(name) && status === "live" && stars >= 1;
-
   const pixelCount = pixels.size;
   const isFull = stars >= maxStars;
 
   const statusLabel = useMemo(() => {
-    if (status === "live") return "Live";
-    if (status === "connecting") return "Connecting…";
-    return "Reconnecting…";
+    if (status === "live") return "LIVE";
+    if (status === "connecting") return "SYNC…";
+    return "OFFLINE";
   }, [status]);
 
   const regenProgress =
     !isFull && regenSeconds > 0
-      ? Math.max(0, Math.min(100, ((regenSeconds - nextStarIn) / regenSeconds) * 100))
+      ? Math.max(
+          0,
+          Math.min(100, ((regenSeconds - nextStarIn) / regenSeconds) * 100)
+        )
       : 100;
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-400">
-        Loading…
+      <div className="flex h-dvh items-center justify-center bg-[#070b14] text-amber-200/60">
+        <span className="text-xs tracking-[0.3em] uppercase">Booting…</span>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
+    <div className="relative h-dvh w-full overflow-hidden bg-[#070b14] text-slate-100">
       {!name && <NameGate onJoin={handleJoin} />}
 
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-white">
-              DSCE Place
-            </h1>
-            <p className="text-xs text-slate-400">
-              Dayananda Sagar · Kumaraswamy Layout
-            </p>
-          </div>
-        </div>
+      {/* Full-screen map */}
+      <PixelCanvas
+        gridWidth={grid.w}
+        gridHeight={grid.h}
+        pixels={pixels}
+        selectedColor={selectedColor}
+        canPlace={canPlace}
+        onPlace={handlePlace}
+        onHover={(p, x, y) => {
+          setHoverPixel(p);
+          setHoverCell({ x, y });
+        }}
+      />
 
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
-              stars > 0
-                ? "bg-amber-500/15 text-amber-200"
-                : "bg-rose-500/15 text-rose-300"
-            }`}
-            title="Paint stars — regenerate over time"
-          >
-            <span aria-hidden>★</span>
-            {stars}/{maxStars}
-            {!isFull && nextStarIn > 0 && (
-              <span className="text-amber-400/80">+1 in {nextStarIn}s</span>
-            )}
-          </span>
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
-              status === "live"
-                ? "bg-emerald-500/15 text-emerald-300"
-                : "bg-amber-500/15 text-amber-300"
-            }`}
-          >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
+      {/* ── TOP HUD ── */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 p-2.5 sm:p-3">
+        {/* Left: brand + status */}
+        <div className="pointer-events-auto flex flex-col gap-1.5">
+          <div className="hud-panel flex items-center gap-2 px-2.5 py-1.5">
+            <div className="flex h-6 w-6 items-center justify-center rounded bg-gradient-to-br from-amber-400 to-orange-600 text-[10px] font-black text-black shadow-inner">
+              D
+            </div>
+            <div className="leading-none">
+              <div className="text-[11px] font-bold tracking-wide text-white">
+                DSCE PLACE
+              </div>
+              <div className="mt-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-amber-200/60">
+                Kumaraswamy
+              </div>
+            </div>
+            <div
+              className={`ml-1 flex items-center gap-1 rounded px-1.5 py-0.5 text-[8px] font-bold tracking-wider ${
                 status === "live"
-                  ? "bg-emerald-400 animate-pulse"
-                  : "bg-amber-400"
+                  ? "bg-emerald-500/20 text-emerald-300"
+                  : "bg-amber-500/20 text-amber-300"
               }`}
-            />
-            {statusLabel}
-          </span>
-          <span className="rounded-full bg-white/5 px-2.5 py-1 text-slate-300">
-            {online} online
-          </span>
-          <span className="rounded-full bg-white/5 px-2.5 py-1 text-slate-300">
-            {pixelCount.toLocaleString()} pixels
-          </span>
-          {name && (
-            <button
-              type="button"
-              onClick={() => {
-                localStorage.removeItem(NAME_KEY);
-                setName(null);
-              }}
-              className="rounded-full bg-sky-500/15 px-2.5 py-1 text-sky-300 hover:bg-sky-500/25"
             >
-              {name}
-            </button>
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  status === "live"
+                    ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]"
+                    : "bg-amber-400"
+                }`}
+              />
+              {statusLabel}
+            </div>
+          </div>
+
+          {hoverPixel && (
+            <div className="hud-panel px-2 py-1 text-[9px] text-slate-300">
+              by{" "}
+              <span className="font-semibold text-amber-200">
+                {hoverPixel.name}
+              </span>
+              {hoverCell.x >= 0 && (
+                <span className="ml-1.5 font-mono text-slate-500">
+                  {hoverCell.x},{hoverCell.y}
+                </span>
+              )}
+            </div>
           )}
         </div>
-      </header>
 
-      <main className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:flex-row">
-        <section className="min-h-[55vh] flex-1 lg:min-h-0">
-          <PixelCanvas
-            gridWidth={grid.w}
-            gridHeight={grid.h}
-            pixels={pixels}
-            selectedColor={selectedColor}
-            canPlace={canPlace}
-            onPlace={handlePlace}
-            hoverInfo={hoverPixel}
-            onHover={(p, x, y) => {
-              setHoverPixel(p);
-              setHoverCell({ x, y });
-            }}
-          />
-        </section>
-
-        <aside className="flex w-full flex-col gap-4 rounded-xl border border-white/10 bg-slate-900/60 p-4 lg:w-72">
-          <div>
-            <h2 className="text-sm font-semibold text-white">Paint campus</h2>
-            <p className="mt-1 text-xs text-slate-400">
-              Each pixel costs ★1. Regen starts the moment you paint — +1 star
-              every {regenSeconds}s (max {maxStars}).
-            </p>
-          </div>
-
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-medium text-amber-100">Stars</span>
-              <span className="font-semibold text-amber-300">
-                ★ {stars} / {maxStars}
+        {/* Right: stars / timer / meta — premium compact gaming cluster */}
+        <div className="pointer-events-auto flex flex-col items-end gap-1.5">
+          <div className="hud-panel flex items-center gap-2 px-2.5 py-1.5">
+            {/* Stars */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-amber-300 drop-shadow-[0_0_6px_rgba(251,191,36,0.7)]">
+                ★
+              </span>
+              <span className="font-mono text-[12px] font-bold tabular-nums text-amber-100">
+                {stars}
+                <span className="text-amber-200/40">/{maxStars}</span>
               </span>
             </div>
-            {!isFull ? (
-              <>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
-                  <div
-                    className="h-full rounded-full bg-amber-400 transition-all duration-1000 linear"
-                    style={{ width: `${regenProgress}%` }}
-                  />
-                </div>
-                <p className="mt-1.5 text-[11px] text-amber-200/70">
-                  Next star in {nextStarIn}s · regenerating now
-                </p>
-              </>
-            ) : (
-              <p className="mt-1.5 text-[11px] text-emerald-300/80">
-                Full bank — paint to start regenerating
-              </p>
-            )}
+
+            <div className="h-3 w-px bg-white/10" />
+
+            {/* Regen timer */}
+            <div className="flex min-w-[52px] flex-col items-end">
+              {isFull ? (
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400/90">
+                  Maxed
+                </span>
+              ) : (
+                <>
+                  <span className="font-mono text-[11px] font-bold tabular-nums text-sky-200">
+                    {String(nextStarIn).padStart(2, "0")}
+                    <span className="text-[8px] font-medium text-sky-300/50">
+                      s
+                    </span>
+                  </span>
+                  <div className="mt-0.5 h-[3px] w-12 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-sky-400 to-amber-300 transition-all duration-1000 linear"
+                      style={{ width: `${regenProgress}%` }}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
           </div>
 
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
-              Color
-            </p>
+          <div className="hud-panel flex items-center gap-2 px-2 py-1 text-[9px] text-slate-300">
+            <span className="tabular-nums">
+              <span className="text-white/90">{online}</span>
+              <span className="text-slate-500"> online</span>
+            </span>
+            <span className="text-white/15">|</span>
+            <span className="tabular-nums">
+              <span className="text-white/90">
+                {pixelCount.toLocaleString()}
+              </span>
+              <span className="text-slate-500"> px</span>
+            </span>
+            {name && (
+              <>
+                <span className="text-white/15">|</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.removeItem(NAME_KEY);
+                    setName(null);
+                  }}
+                  className="max-w-[72px] truncate font-semibold text-amber-200/90 hover:text-amber-100"
+                  title="Change name"
+                >
+                  {name}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── BOTTOM: color palette bar ── */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-2.5 sm:p-3">
+        <div className="pointer-events-auto hud-panel max-w-[min(100%,560px)] px-2.5 py-2">
+          <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+            <span className="text-[8px] font-bold uppercase tracking-[0.2em] text-white/35">
+              Loadout
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="h-3.5 w-3.5 rounded-sm border border-white/40 shadow"
+                style={{ backgroundColor: selectedColor }}
+              />
+              <button
+                type="button"
+                onClick={() => setHudOpen((v) => !v)}
+                className="text-[8px] font-semibold uppercase tracking-wider text-white/40 hover:text-white/70"
+              >
+                {hudOpen ? "Hide" : "Show"}
+              </button>
+            </div>
+          </div>
+          {hudOpen && (
             <ColorPalette
               colors={palette}
               selected={selectedColor}
               onSelect={setSelectedColor}
+              compact
             />
-          </div>
+          )}
+          <p className="mt-1.5 text-center text-[8px] text-white/25">
+            Scroll zoom · Pinch · Drag pan · Double‑click reset · Tap to paint
+          </p>
+        </div>
+      </div>
 
-          <div className="rounded-lg border border-white/10 bg-slate-950/60 p-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-slate-400">Selected</span>
-              <span
-                className="h-5 w-5 rounded border border-white/30"
-                style={{ backgroundColor: selectedColor }}
-              />
-            </div>
-            <div className="mt-2 flex items-center justify-between">
-              <span className="text-slate-400">Cell</span>
-              <span className="font-mono text-slate-200">
-                {hoverCell.x >= 0 ? `${hoverCell.x}, ${hoverCell.y}` : "—"}
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-auto space-y-2 text-[11px] leading-relaxed text-slate-500">
-            <p>
-              Grid {grid.w}×{grid.h}. Stars are per IP — changing name does not
-              refill them.
-            </p>
-            <p>Scroll to zoom · drag to pan · click to place.</p>
-          </div>
-        </aside>
-      </main>
+      {/* Soft vignette for premium look */}
+      <div
+        className="pointer-events-none absolute inset-0 z-10"
+        style={{
+          background:
+            "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.35) 100%)",
+        }}
+      />
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2 rounded-full border border-white/10 bg-slate-900 px-4 py-2 text-sm text-white shadow-xl">
+        <div className="absolute bottom-24 left-1/2 z-40 -translate-x-1/2 hud-panel px-3 py-1.5 text-[11px] font-medium text-amber-50 shadow-2xl">
           {toast}
         </div>
       )}
