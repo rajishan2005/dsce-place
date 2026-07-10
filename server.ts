@@ -45,11 +45,52 @@ const port = parseInt(process.env.PORT || "3000", 10);
 const DATA_DIR = path.join(process.cwd(), "data");
 const REGEN_MS = REGEN_SECONDS * 1000;
 
+/**
+ * Bump this to wipe player identities + star quotas on next boot
+ * (so everyone can join again with a fresh name/team).
+ * Does NOT wipe painted pixels.
+ */
+const PLAYER_RESET_VERSION = 2;
+
 // ── Persistence ──────────────────────────────────────────
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+/** One-shot player registry reset for deploys */
+function runPlayerResetIfNeeded() {
+  ensureDataDir();
+  const verFile = path.join(DATA_DIR, "player-reset-version");
+  let current = 0;
+  try {
+    if (fs.existsSync(verFile)) {
+      current = parseInt(fs.readFileSync(verFile, "utf-8").trim(), 10) || 0;
+    }
+  } catch {
+    current = 0;
+  }
+  if (current >= PLAYER_RESET_VERSION) return;
+
+  for (const f of ["identities.json", "quotas.json", "scores.json"]) {
+    const p = path.join(DATA_DIR, f);
+    try {
+      if (f === "scores.json") {
+        fs.writeFileSync(p, JSON.stringify({ teamScore: {}, freeScore: {} }));
+      } else {
+        fs.writeFileSync(p, "{}");
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  fs.writeFileSync(verFile, String(PLAYER_RESET_VERSION));
+  console.log(
+    `> Player reset v${PLAYER_RESET_VERSION}: identities, quotas, scores wiped — join fresh`
+  );
+}
+
+runPlayerResetIfNeeded();
 
 function worldFile(mode: GameMode) {
   return path.join(DATA_DIR, `pixels-${mode}.json`);
