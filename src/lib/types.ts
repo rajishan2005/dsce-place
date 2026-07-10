@@ -33,6 +33,8 @@ export interface QuotaUpdate {
   isFull: boolean;
   /** Multiplier ends at this timestamp (0 if inactive) */
   multiplierUntil: number;
+  /** Masked client IP — stars are locked to this network */
+  ipMasked?: string;
 }
 
 export interface TeamScoreRow {

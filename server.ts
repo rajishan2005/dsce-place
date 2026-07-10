@@ -19,6 +19,7 @@ import {
   POWERUPS,
   ERASER_COST,
   BASE_SCORE_PER_PIXEL,
+  colorForTeam,
   type GameMode,
   type TeamId,
   type WaveDir,
@@ -212,22 +213,47 @@ function isValidTeam(t: unknown): t is TeamId {
   return typeof t === "string" && (TEAMS as readonly string[]).includes(t);
 }
 
+/** Resolve real client IP (Railway / Cloudflare / reverse proxies). */
 function getClientIp(socket: Socket): string {
   const headers = socket.handshake.headers;
-  const forwarded = headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0]!.trim();
+  const pick = (v: string | string[] | undefined): string | null => {
+    if (!v) return null;
+    const s = Array.isArray(v) ? v[0] : v;
+    if (!s || typeof s !== "string") return null;
+    // X-Forwarded-For: client, proxy1, proxy2 — leftmost is original client
+    return s.split(",")[0]!.trim().replace(/^::ffff:/, "") || null;
+  };
+
+  const candidates = [
+    pick(headers["cf-connecting-ip"]),
+    pick(headers["true-client-ip"]),
+    pick(headers["x-real-ip"]),
+    pick(headers["x-forwarded-for"]),
+    pick(headers["x-client-ip"]),
+  ];
+  for (const c of candidates) {
+    if (c && c !== "unknown" && c !== "127.0.0.1" && c !== "::1") return c;
   }
-  if (Array.isArray(forwarded) && forwarded[0]) {
-    return forwarded[0].split(",")[0]!.trim();
+  for (const c of candidates) {
+    if (c) return c;
   }
-  const realIp = headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0) return realIp.trim();
   const addr =
     socket.handshake.address ||
     socket.request.socket?.remoteAddress ||
     "unknown";
   return addr.replace(/^::ffff:/, "");
+}
+
+/** Mask for UI (never show full IP to other players) */
+function maskIp(ip: string): string {
+  if (!ip || ip === "unknown") return "—";
+  if (ip.includes(".")) {
+    const p = ip.split(".");
+    return `${p[0]}.${p[1]}.*.*`;
+  }
+  // IPv6: show first 2 hextets
+  const p = ip.split(":");
+  return `${p[0] || ""}:${p[1] || ""}:…`;
 }
 
 // ── State ────────────────────────────────────────────────
@@ -287,6 +313,7 @@ function quotaSnapshot(ip: string, now = Date.now()): QuotaUpdate {
     nextStarIn: isFull ? 0 : nextStarInSeconds(q, now),
     isFull,
     multiplierUntil: q.multiplierUntil > now ? q.multiplierUntil : 0,
+    ipMasked: maskIp(ip),
   };
 }
 
@@ -373,10 +400,13 @@ function paintCell(
   team: TeamId | null,
   now: number
 ): Pixel {
+  // Team mode: force the branch color (one color per team)
+  const finalColor =
+    mode === "team" && team ? colorForTeam(team) : color;
   const pixel: Pixel = {
     x,
     y,
-    color,
+    color: finalColor,
     name,
     placedAt: now,
     mode,
@@ -457,15 +487,20 @@ app.prepare().then(() => {
           return;
         }
         const m = payload.mode;
-        if (m === "team" && payload.team && !isValidTeam(payload.team)) {
-          ack?.({ error: "Invalid team" });
-          return;
+        if (m === "team") {
+          if (!isValidTeam(payload.team)) {
+            ack?.({ error: "Pick a valid team/branch." });
+            return;
+          }
         }
         const prev = socket.data.mode as GameMode;
         socket.leave(`mode:${prev}`);
         socket.join(`mode:${m}`);
         socket.data.mode = m;
-        socket.data.team = m === "team" ? payload.team ?? null : null;
+        socket.data.team = m === "team" ? payload.team! : null;
+        console.log(
+          `> joinMode ${socket.id} ip=${socket.data.ip} mode=${m} team=${socket.data.team ?? "-"}`
+        );
 
         const h: ServerHello = {
           pixels: Array.from(worlds[m].values()),
@@ -567,12 +602,14 @@ app.prepare().then(() => {
           return;
         }
 
-        // ── Paint / Bomb / Wave need color ──
-        if (!isValidColor(payload?.color)) {
+        // ── Paint / Bomb / Wave need color (team mode forces team color) ──
+        let color = payload.color;
+        if (mode === "team" && team) {
+          color = colorForTeam(team);
+        } else if (!isValidColor(payload?.color)) {
           ack?.({ error: "Pick a color from the palette." });
           return;
         }
-        const color = payload.color;
 
         if (tool === "bomb") {
           const spend = trySpendStars(clientIp, POWERUPS.bomb.cost, now);

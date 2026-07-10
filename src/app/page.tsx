@@ -12,6 +12,9 @@ import {
   MAX_STARS,
   POWERUPS,
   REGEN_SECONDS,
+  TEAMS,
+  TEAM_COLORS,
+  colorForTeam,
   type GameMode,
   type TeamId,
   type WaveDir,
@@ -60,10 +63,20 @@ export default function Home() {
   const [teamScores, setTeamScores] = useState<TeamScoreRow[]>([]);
   const [freeScores, setFreeScores] = useState<FreeScoreRow[]>([]);
   const [nowTick, setNowTick] = useState(Date.now());
+  /** Modal: pick branch when switching Free → Team */
+  const [teamPickerOpen, setTeamPickerOpen] = useState(false);
+  const [pendingTeam, setPendingTeam] = useState<TeamId>("CSE");
+  const [ipMasked, setIpMasked] = useState<string>("");
 
   const canvasRef = useRef<PixelCanvasHandle>(null);
   const modeRef = useRef(mode);
   modeRef.current = mode;
+
+  /** Active paint color: team lock in team mode */
+  const activeColor = useMemo(() => {
+    if (mode === "team" && team) return colorForTeam(team);
+    return selectedColor;
+  }, [mode, team, selectedColor]);
 
   useEffect(() => {
     setReady(true);
@@ -82,6 +95,7 @@ export default function Home() {
     setNextStarIn(quota.nextStarIn);
     setRegenSeconds(quota.regenSeconds);
     setMultiplierUntil(quota.multiplierUntil || 0);
+    if (quota.ipMasked) setIpMasked(quota.ipMasked);
   }, []);
 
   useEffect(() => {
@@ -181,22 +195,38 @@ export default function Home() {
     setName(n);
     setMode(m);
     setTeam(t);
+    if (m === "team" && t) setSelectedColor(colorForTeam(t));
     socket?.emit("joinMode", { mode: m, team: t }, () => {
       /* hello follows */
     });
   };
 
+  const enterTeamMode = (t: TeamId) => {
+    if (!name) return;
+    setTeam(t);
+    setMode("team");
+    setSelectedColor(colorForTeam(t));
+    localStorage.setItem(MODE_KEY, "team");
+    localStorage.setItem(TEAM_KEY, t);
+    setTeamPickerOpen(false);
+    socket?.emit("joinMode", { mode: "team", team: t }, (res: { error?: string }) => {
+      if (res?.error) showToast(res.error);
+      else showToast(`Team Mode · ${t}`);
+    });
+  };
+
   const switchMode = (m: GameMode) => {
     if (!name) return;
-    let t = team;
-    if (m === "team" && !t) {
-      t = "CSE";
-      setTeam(t);
+    if (m === "team") {
+      // Always ask which branch when entering team mode
+      setPendingTeam(team && TEAMS.includes(team) ? team : "CSE");
+      setTeamPickerOpen(true);
+      return;
     }
-    setMode(m);
-    localStorage.setItem(MODE_KEY, m);
-    socket?.emit("joinMode", { mode: m, team: m === "team" ? t : null });
-    showToast(m === "team" ? "Switched to Team Mode" : "Switched to Free Mode");
+    setMode("free");
+    localStorage.setItem(MODE_KEY, "free");
+    socket?.emit("joinMode", { mode: "free", team: null });
+    showToast("Switched to Free Mode");
   };
 
   const toolCost = useMemo(() => {
@@ -228,7 +258,7 @@ export default function Home() {
             type: "paint",
             x,
             y,
-            color: selectedColor,
+            color: activeColor,
             points: multiplierUntil > Date.now() ? 2 : 1,
           });
         } else {
@@ -241,7 +271,7 @@ export default function Home() {
         {
           x,
           y,
-          color: selectedColor,
+          color: activeColor,
           name,
           mode,
           team,
@@ -266,7 +296,7 @@ export default function Home() {
       toolCost,
       nextStarIn,
       tool,
-      selectedColor,
+      activeColor,
       mode,
       team,
       waveDir,
@@ -288,7 +318,7 @@ export default function Home() {
       {
         x: 0,
         y: 0,
-        color: selectedColor,
+        color: activeColor,
         name,
         mode,
         team,
@@ -341,13 +371,63 @@ export default function Home() {
     <div className="relative h-dvh w-full overflow-hidden bg-[#070b14] text-slate-100">
       {!name && <NameGate onJoin={handleJoin} />}
 
+      {/* Team picker when switching Free → Team */}
+      {teamPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
+          <div className="hud-panel w-full max-w-sm p-5">
+            <h2 className="text-center text-sm font-bold text-white">
+              Pick your branch
+            </h2>
+            <p className="mt-1 text-center text-[11px] text-white/40">
+              Each team paints with one color only.
+            </p>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              {TEAMS.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setPendingTeam(t)}
+                  className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-xs font-bold transition ${
+                    pendingTeam === t
+                      ? "border-white/50 bg-white/10 text-white"
+                      : "border-white/10 bg-black/30 text-white/60 hover:border-white/25"
+                  }`}
+                >
+                  <span
+                    className="h-4 w-4 shrink-0 rounded-full border border-white/30"
+                    style={{ backgroundColor: TEAM_COLORS[t] }}
+                  />
+                  {t}
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setTeamPickerOpen(false)}
+                className="flex-1 rounded-lg border border-white/10 py-2 text-xs font-semibold text-white/50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => enterTeamMode(pendingTeam)}
+                className="flex-1 rounded-lg bg-gradient-to-r from-sky-400 to-blue-500 py-2 text-xs font-bold text-black"
+              >
+                Join {pendingTeam}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <PixelCanvas
         ref={canvasRef}
         gridWidth={grid.w}
         gridHeight={grid.h}
         pixels={pixels}
         pixelsRevision={pixelsRevision}
-        selectedColor={selectedColor}
+        selectedColor={activeColor}
         canPlace={canPlace}
         tool={tool === "multiplier" ? "paint" : tool}
         waveDir={waveDir}
@@ -475,7 +555,7 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="hud-panel flex items-center gap-2 px-2 py-1 text-[9px] text-slate-300">
+          <div className="hud-panel flex flex-wrap items-center justify-end gap-2 px-2 py-1 text-[9px] text-slate-300">
             <span className="tabular-nums">
               <span className="text-white/90">{online}</span>
               <span className="text-slate-500"> online</span>
@@ -503,6 +583,14 @@ export default function Home() {
               </>
             )}
           </div>
+          {ipMasked && (
+            <div
+              className="hud-panel px-2 py-1 text-[8px] text-white/35"
+              title="Stars are locked to your network IP — changing name does not reset them"
+            >
+              IP lock · {ipMasked}
+            </div>
+          )}
 
           {/* Leaderboard */}
           <div className="hud-panel max-h-40 w-[150px] overflow-y-auto px-2 py-1.5 sm:w-[168px]">
@@ -615,32 +703,61 @@ export default function Home() {
 
           <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
             <span className="text-[8px] font-bold uppercase tracking-[0.2em] text-white/35">
-              Color
+              {mode === "team" ? "Team color" : "Color"}
             </span>
             <div className="flex items-center gap-1.5">
               <span
                 className="h-3.5 w-3.5 rounded-sm border border-white/40"
-                style={{ backgroundColor: selectedColor }}
+                style={{ backgroundColor: activeColor }}
               />
-              <button
-                type="button"
-                onClick={() => setHudOpen((v) => !v)}
-                className="text-[8px] font-semibold uppercase tracking-wider text-white/40"
-              >
-                {hudOpen ? "Hide" : "Show"}
-              </button>
+              {mode === "free" && (
+                <button
+                  type="button"
+                  onClick={() => setHudOpen((v) => !v)}
+                  className="text-[8px] font-semibold uppercase tracking-wider text-white/40"
+                >
+                  {hudOpen ? "Hide" : "Show"}
+                </button>
+              )}
+              {mode === "team" && team && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingTeam(team);
+                    setTeamPickerOpen(true);
+                  }}
+                  className="text-[8px] font-semibold uppercase tracking-wider text-sky-300/80"
+                >
+                  Change team
+                </button>
+              )}
             </div>
           </div>
-          {hudOpen && (
-            <ColorPalette
-              colors={palette}
-              selected={selectedColor}
-              onSelect={setSelectedColor}
-              compact
-            />
+          {mode === "team" && team ? (
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+              <span
+                className="h-6 w-6 rounded-md border border-white/30 shadow"
+                style={{ backgroundColor: colorForTeam(team) }}
+              />
+              <div className="text-left">
+                <div className="text-[11px] font-bold text-white">{team}</div>
+                <div className="text-[9px] text-white/40">
+                  Whole team paints this color
+                </div>
+              </div>
+            </div>
+          ) : (
+            hudOpen && (
+              <ColorPalette
+                colors={palette}
+                selected={selectedColor}
+                onSelect={setSelectedColor}
+                compact
+              />
+            )
           )}
           <p className="mt-1.5 text-center text-[8px] text-white/25">
-            Scroll zoom · Drag pan · Tap to use tool · No GPS
+            Scroll zoom · Drag pan · Stars locked per IP
           </p>
         </div>
       </div>

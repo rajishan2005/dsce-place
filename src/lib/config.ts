@@ -30,6 +30,22 @@ export const TEAMS = [
 
 export type TeamId = (typeof TEAMS)[number];
 
+/** One fixed brand color per team (team mode only) */
+export const TEAM_COLORS: Record<TeamId, string> = {
+  ISE: "#0A84FF",
+  CSE: "#FF3B30",
+  AIML: "#BF5AF2",
+  ECE: "#30D158",
+  EEE: "#FFD60A",
+  Mechanical: "#FF9F0A",
+  Civil: "#64D2FF",
+  Other: "#AC8E68",
+};
+
+export function colorForTeam(team: TeamId): string {
+  return TEAM_COLORS[team];
+}
+
 /** Power-up costs (stars) and effects */
 export const POWERUPS = {
   bomb: {
