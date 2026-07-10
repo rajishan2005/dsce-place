@@ -1,36 +1,108 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DSCE Place
 
-## Getting Started
+Collaborative real-time pixel canvas over **Dayananda Sagar College of Engineering** (Kumaraswamy Layout, Bengaluru) — like r/place on a campus satellite map.
 
-First, run the development server:
+## Features
+
+- **Satellite campus background** (DSCE / Kumaraswamy Layout)
+- **200×200 pixel grid** anyone can paint
+- **Real-time sync** via Socket.IO (all users see pixels instantly)
+- **Name only** — no account; name is saved in the browser
+- **★ Star bank** — 30 stars per IP; paint costs 1; +1 star every 30s (regen starts the moment you paint)
+- **Persistent canvas** — pixels in `data/pixels.json`, quotas in `data/quotas.json`
+
+## Quick start
 
 ```bash
+cd dsce-place
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Share your LAN URL so classmates can join the same live canvas:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```text
+http://YOUR_IP:3000
+```
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
+| Command | Description |
+|--------|-------------|
+| `npm run dev` | Dev server (Next.js + Socket.IO) |
+| `npm run build` | Production build |
+| `npm start` | Run production server |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## How to use
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Enter a display name
+2. Pick a color from the palette
+3. Click the map to place a pixel
+4. Scroll to zoom, drag to pan
+5. Hover a pixel to see who placed it
 
-## Deploy on Vercel
+## Config
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Edit `src/lib/config.ts`:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `GRID_WIDTH` / `GRID_HEIGHT` — canvas resolution
+- `MAX_STARS` — star bank size (default 30)
+- `REGEN_SECONDS` — seconds to regenerate +1 star (default 30)
+- `COLOR_PALETTE` — allowed colors
+- `CAMPUS_BOUNDS` — geographic notes for the map area
+
+Background image: `public/campus-satellite.jpg`  
+Replace this file with your own campus map (same filename) to change the backdrop.
+
+**Limits:** tracked by client **IP** (works behind Railway via `X-Forwarded-For`). Changing display name does not reset free pixels or cooldown.
+
+## Stack
+
+- **Next.js** (React + TypeScript + Tailwind)
+- **Socket.IO** for real-time multiplayer
+- **Custom Node server** (`server.ts`) serving Next + WebSockets
+- **JSON file** persistence (easy to swap for Redis/Postgres later)
+
+## Deploy on Railway (recommended)
+
+This app needs **one always-on Node process** (Next.js + Socket.IO). Railway supports that.
+
+### 1. Push to GitHub
+
+```bash
+cd dsce-place
+git add .
+git commit -m "DSCE Place ready for Railway"
+# Create a repo on GitHub, then:
+git remote add origin https://github.com/YOUR_USER/dsce-place.git
+git push -u origin master
+```
+
+### 2. Deploy
+
+1. Go to [railway.app](https://railway.app) → sign in with GitHub  
+2. **New Project** → **Deploy from GitHub repo** → pick `dsce-place`  
+3. Railway should detect Node and use `railway.toml`:
+   - **Build:** `npm run build`
+   - **Start:** `npm start`
+4. Open the service → **Settings** → **Networking** → **Generate Domain**  
+5. Share that `https://….up.railway.app` link with everyone  
+
+No env vars required. Railway sets `PORT` automatically; `server.ts` already uses it.
+
+### 3. Optional: keep pixels across restarts
+
+By default pixels are stored in `data/pixels.json` on the container disk (can reset on redeploy).
+
+To keep them longer:
+
+1. In Railway → your service → **Volumes**  
+2. Mount a volume at `/app/data` (or the app’s `data` folder path Railway shows)  
+3. Redeploy  
+
+### Notes
+
+- Free/trial limits apply — check Railway pricing if traffic is heavy  
+- Serverless hosts (basic Vercel) are **not** a good fit for Socket.IO
