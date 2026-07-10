@@ -33,12 +33,34 @@ import type {
 const NAME_KEY = "dsce-place-name";
 const MODE_KEY = "dsce-place-mode";
 const TEAM_KEY = "dsce-place-team";
+const DEVICE_KEY = "dsce-place-device-id";
+const TEAM_LOCKED_KEY = "dsce-place-team-locked";
+
+function getOrCreateDeviceId(): string {
+  try {
+    let id = localStorage.getItem(DEVICE_KEY);
+    if (!id) {
+      id =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `d-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      localStorage.setItem(DEVICE_KEY, id);
+    }
+    // Also mirror in cookie (same browser, all tabs) for 1 year
+    document.cookie = `dsce_device=${encodeURIComponent(id)};path=/;max-age=31536000;SameSite=Lax`;
+    return id;
+  } catch {
+    return `d-tmp-${Date.now()}`;
+  }
+}
 
 export default function Home() {
   const [name, setName] = useState<string | null>(null);
   const [mode, setMode] = useState<GameMode>("free");
   const [team, setTeam] = useState<TeamId | null>(null);
+  const [teamLocked, setTeamLocked] = useState(false);
   const [ready, setReady] = useState(false);
+  const [deviceId, setDeviceId] = useState<string>("");
   const [pixels, setPixels] = useState<Map<string, Pixel>>(() => new Map());
   const [pixelsRevision, setPixelsRevision] = useState(0);
   const [selectedColor, setSelectedColor] = useState<string>(COLOR_PALETTE[6]);
@@ -79,6 +101,22 @@ export default function Home() {
   }, [mode, team, selectedColor]);
 
   useEffect(() => {
+    const id = getOrCreateDeviceId();
+    setDeviceId(id);
+    // Restore local session immediately (no re-ask on refresh)
+    const savedName = localStorage.getItem(NAME_KEY);
+    const savedMode = localStorage.getItem(MODE_KEY) as GameMode | null;
+    const savedTeam = localStorage.getItem(TEAM_KEY) as TeamId | null;
+    const locked = localStorage.getItem(TEAM_LOCKED_KEY) === "1";
+    if (savedName) {
+      setName(savedName);
+      if (savedMode === "free" || savedMode === "team") setMode(savedMode);
+      if (savedTeam && TEAMS.includes(savedTeam)) {
+        setTeam(savedTeam);
+        setSelectedColor(colorForTeam(savedTeam));
+      }
+      setTeamLocked(locked || Boolean(savedTeam && savedMode === "team"));
+    }
     setReady(true);
   }, []);
 
@@ -120,6 +158,25 @@ export default function Home() {
     return () => clearInterval(t);
   }, [stars < maxStars, maxStars, regenSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const applyIdentity = useCallback(
+    (id: NonNullable<ServerHello["identity"]>) => {
+      setName(id.name);
+      setMode(id.mode);
+      setTeam(id.team);
+      setTeamLocked(id.teamLocked || Boolean(id.team));
+      localStorage.setItem(NAME_KEY, id.name);
+      localStorage.setItem(MODE_KEY, id.mode);
+      if (id.team) {
+        localStorage.setItem(TEAM_KEY, id.team);
+        setSelectedColor(colorForTeam(id.team));
+      }
+      if (id.teamLocked || id.team) {
+        localStorage.setItem(TEAM_LOCKED_KEY, "1");
+      }
+    },
+    []
+  );
+
   const applyHello = useCallback(
     (hello: ServerHello) => {
       const map = new Map<string, Pixel>();
@@ -135,20 +192,29 @@ export default function Home() {
       setMode(hello.mode);
       setTeamScores(hello.teamScores || []);
       setFreeScores(hello.freeScores || []);
+      // Server IP/device identity wins — skip name gate on refresh
+      if (hello.identity?.name) {
+        applyIdentity(hello.identity);
+      }
       setStatus("live");
     },
-    [applyQuota]
+    [applyQuota, applyIdentity]
   );
 
   useEffect(() => {
+    if (!deviceId) return;
     const s = io({
       path: "/socket.io",
       transports: ["websocket", "polling"],
       autoConnect: true,
+      auth: { deviceId },
     });
     setSocket(s);
 
-    s.on("connect", () => setStatus("live"));
+    s.on("connect", () => {
+      setStatus("live");
+      s.emit("helloDevice", { deviceId });
+    });
     s.on("disconnect", () => setStatus("offline"));
 
     s.on("hello", (hello: ServerHello) => applyHello(hello));
@@ -180,7 +246,7 @@ export default function Home() {
     return () => {
       s.disconnect();
     };
-  }, [applyHello, applyQuota]);
+  }, [deviceId, applyHello, applyQuota]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -190,43 +256,99 @@ export default function Home() {
   const handleJoin = (n: string, m: GameMode, t: TeamId | null) => {
     localStorage.setItem(NAME_KEY, n);
     localStorage.setItem(MODE_KEY, m);
-    if (t) localStorage.setItem(TEAM_KEY, t);
-    else localStorage.removeItem(TEAM_KEY);
+    if (t) {
+      localStorage.setItem(TEAM_KEY, t);
+      localStorage.setItem(TEAM_LOCKED_KEY, "1");
+      setTeamLocked(true);
+    } else {
+      localStorage.removeItem(TEAM_KEY);
+    }
     setName(n);
     setMode(m);
     setTeam(t);
     if (m === "team" && t) setSelectedColor(colorForTeam(t));
-    socket?.emit("joinMode", { mode: m, team: t }, () => {
-      /* hello follows */
-    });
+    socket?.emit(
+      "joinMode",
+      { mode: m, team: t, name: n, deviceId },
+      (res: { error?: string; identity?: ServerHello["identity"] }) => {
+        if (res?.error) showToast(res.error);
+        if (res?.identity) applyIdentity(res.identity);
+      }
+    );
   };
 
   const enterTeamMode = (t: TeamId) => {
     if (!name) return;
-    setTeam(t);
-    setMode("team");
-    setSelectedColor(colorForTeam(t));
-    localStorage.setItem(MODE_KEY, "team");
-    localStorage.setItem(TEAM_KEY, t);
+    if (teamLocked && team && team !== t) {
+      showToast("Team can't be changed");
+      setTeamPickerOpen(false);
+      return;
+    }
     setTeamPickerOpen(false);
-    socket?.emit("joinMode", { mode: "team", team: t }, (res: { error?: string }) => {
-      if (res?.error) showToast(res.error);
-      else showToast(`Team Mode · ${t}`);
-    });
+    socket?.emit(
+      "joinMode",
+      { mode: "team", team: t, name, deviceId },
+      (res: {
+        error?: string;
+        identity?: ServerHello["identity"];
+        ok?: boolean;
+      }) => {
+        if (res?.error) {
+          showToast(res.error);
+          if (res.identity) applyIdentity(res.identity);
+          return;
+        }
+        if (res?.identity) applyIdentity(res.identity);
+        else {
+          setTeam(t);
+          setMode("team");
+          setTeamLocked(true);
+          setSelectedColor(colorForTeam(t));
+          localStorage.setItem(MODE_KEY, "team");
+          localStorage.setItem(TEAM_KEY, t);
+          localStorage.setItem(TEAM_LOCKED_KEY, "1");
+        }
+        showToast(`Team Mode · ${t}`);
+      }
+    );
   };
 
   const switchMode = (m: GameMode) => {
     if (!name) return;
     if (m === "team") {
-      // Always ask which branch when entering team mode
+      if (teamLocked && team) {
+        // Already locked — re-enter team world without re-picking
+        socket?.emit(
+          "joinMode",
+          { mode: "team", team, name, deviceId },
+          (res: { error?: string; identity?: ServerHello["identity"] }) => {
+            if (res?.error) showToast(res.error);
+            if (res?.identity) applyIdentity(res.identity);
+            else {
+              setMode("team");
+              showToast(`Team Mode · ${team}`);
+            }
+          }
+        );
+        return;
+      }
       setPendingTeam(team && TEAMS.includes(team) ? team : "CSE");
       setTeamPickerOpen(true);
       return;
     }
-    setMode("free");
-    localStorage.setItem(MODE_KEY, "free");
-    socket?.emit("joinMode", { mode: "free", team: null });
-    showToast("Switched to Free Mode");
+    socket?.emit(
+      "joinMode",
+      { mode: "free", team: null, name, deviceId },
+      (res: { error?: string; identity?: ServerHello["identity"] }) => {
+        if (res?.error) showToast(res.error);
+        if (res?.identity) applyIdentity(res.identity);
+        else {
+          setMode("free");
+          localStorage.setItem(MODE_KEY, "free");
+        }
+        showToast("Switched to Free Mode");
+      }
+    );
   };
 
   const toolCost = useMemo(() => {
@@ -380,6 +502,9 @@ export default function Home() {
             </h2>
             <p className="mt-1 text-center text-[11px] text-white/40">
               Each team paints with one color only.
+            </p>
+            <p className="mt-2 text-center text-[11px] font-bold text-red-500">
+              Can&apos;t be changed after you join
             </p>
             <div className="mt-4 grid grid-cols-2 gap-2">
               {TEAMS.map((t) => (
@@ -570,16 +695,9 @@ export default function Home() {
             {name && (
               <>
                 <span className="text-white/15">|</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    localStorage.removeItem(NAME_KEY);
-                    setName(null);
-                  }}
-                  className="max-w-[72px] truncate font-semibold text-amber-200/90"
-                >
+                <span className="max-w-[72px] truncate font-semibold text-amber-200/90">
                   {name}
-                </button>
+                </span>
               </>
             )}
           </div>
@@ -719,32 +837,25 @@ export default function Home() {
                   {hudOpen ? "Hide" : "Show"}
                 </button>
               )}
-              {mode === "team" && team && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPendingTeam(team);
-                    setTeamPickerOpen(true);
-                  }}
-                  className="text-[8px] font-semibold uppercase tracking-wider text-sky-300/80"
-                >
-                  Change team
-                </button>
-              )}
             </div>
           </div>
           {mode === "team" && team ? (
-            <div className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-              <span
-                className="h-6 w-6 rounded-md border border-white/30 shadow"
-                style={{ backgroundColor: colorForTeam(team) }}
-              />
-              <div className="text-left">
-                <div className="text-[11px] font-bold text-white">{team}</div>
-                <div className="text-[9px] text-white/40">
-                  Whole team paints this color
+            <div className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+              <div className="flex items-center justify-center gap-2">
+                <span
+                  className="h-6 w-6 rounded-md border border-white/30 shadow"
+                  style={{ backgroundColor: colorForTeam(team) }}
+                />
+                <div className="text-left">
+                  <div className="text-[11px] font-bold text-white">{team}</div>
+                  <div className="text-[9px] text-white/40">
+                    Whole team paints this color
+                  </div>
                 </div>
               </div>
+              <p className="text-[10px] font-bold uppercase tracking-wide text-red-500">
+                Can&apos;t be changed
+              </p>
             </div>
           ) : (
             hudOpen && (

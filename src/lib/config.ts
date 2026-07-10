@@ -66,7 +66,7 @@ export const POWERUPS = {
   wave: {
     id: "wave" as const,
     label: "Ink Wave",
-    cost: 3,
+    cost: 8,
     length: 10,
   },
 } as const;

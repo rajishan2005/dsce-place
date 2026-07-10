@@ -50,6 +50,15 @@ export interface FreeScoreRow {
   score: number;
 }
 
+/** Bound identity for one network/device (stars + name + locked team) */
+export interface PlayerIdentity {
+  name: string;
+  mode: GameMode;
+  team: TeamId | null;
+  /** Once set in team mode, cannot change */
+  teamLocked: boolean;
+}
+
 export interface ServerHello {
   pixels: Pixel[];
   gridWidth: number;
@@ -63,6 +72,8 @@ export interface ServerHello {
   teamScores: TeamScoreRow[];
   freeScores: FreeScoreRow[];
   teams: readonly string[];
+  /** If IP/device already registered — auto-login */
+  identity?: PlayerIdentity | null;
 }
 
 export interface PixelsBatchEvent {

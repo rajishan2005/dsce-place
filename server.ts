@@ -35,6 +35,7 @@ import type {
   PixelsBatchEvent,
   ScoresUpdate,
   ToolId,
+  PlayerIdentity,
 } from "./src/lib/types";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -185,6 +186,12 @@ function schedulePersist() {
       path.join(DATA_DIR, "scores.json"),
       JSON.stringify(scoresObj)
     );
+    const idObj: Record<string, StoredIdentity> = {};
+    for (const [k, v] of identities) idObj[k] = v;
+    fs.writeFileSync(
+      path.join(DATA_DIR, "identities.json"),
+      JSON.stringify(idObj)
+    );
   }, 600);
 }
 
@@ -256,6 +263,162 @@ function maskIp(ip: string): string {
   return `${p[0] || ""}:${p[1] || ""}:…`;
 }
 
+// ── Identity: one device/network = one player ────────────
+
+interface StoredIdentity {
+  name: string;
+  mode: GameMode;
+  team: TeamId | null;
+  teamLocked: boolean;
+  deviceIds: string[];
+  updatedAt: number;
+}
+
+/** Keyed by `ip:<addr>` and also index deviceId → ip key */
+const identities = new Map<string, StoredIdentity>();
+const deviceToIpKey = new Map<string, string>();
+
+function ipKey(ip: string) {
+  return `ip:${ip}`;
+}
+
+function loadIdentities() {
+  ensureDataDir();
+  const file = path.join(DATA_DIR, "identities.json");
+  if (!fs.existsSync(file)) return;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<
+      string,
+      StoredIdentity
+    >;
+    for (const [k, v] of Object.entries(raw)) {
+      if (!v?.name) continue;
+      identities.set(k, {
+        name: v.name,
+        mode: v.mode === "team" ? "team" : "free",
+        team: v.team && isValidTeam(v.team) ? v.team : null,
+        teamLocked: Boolean(v.teamLocked || v.team),
+        deviceIds: Array.isArray(v.deviceIds) ? v.deviceIds : [],
+        updatedAt: v.updatedAt || Date.now(),
+      });
+      for (const d of identities.get(k)!.deviceIds) {
+        deviceToIpKey.set(d, k);
+      }
+    }
+  } catch {
+    console.warn("Could not load identities.json");
+  }
+}
+
+function saveIdentitiesSoon() {
+  schedulePersist();
+}
+
+function findIdentity(ip: string, deviceId?: string | null): StoredIdentity | null {
+  if (deviceId && deviceToIpKey.has(deviceId)) {
+    const k = deviceToIpKey.get(deviceId)!;
+    const id = identities.get(k);
+    if (id) return id;
+  }
+  return identities.get(ipKey(ip)) ?? null;
+}
+
+function toPublicIdentity(id: StoredIdentity): PlayerIdentity {
+  return {
+    name: id.name,
+    mode: id.mode,
+    team: id.team,
+    teamLocked: id.teamLocked,
+  };
+}
+
+/**
+ * Register or resume player for this IP (+ optional durable device id).
+ * Name is bound to IP: same network keeps same player across browsers/refreshes.
+ */
+function upsertIdentity(
+  ip: string,
+  opts: {
+    name?: string | null;
+    mode?: GameMode;
+    team?: TeamId | null;
+    deviceId?: string | null;
+  }
+): { ok: true; identity: StoredIdentity } | { ok: false; error: string; identity?: StoredIdentity } {
+  const key = ipKey(ip);
+  let id = identities.get(key);
+
+  // Device previously seen on another IP? Prefer that profile if IP unknown fresh
+  if (!id && opts.deviceId && deviceToIpKey.has(opts.deviceId)) {
+    const oldKey = deviceToIpKey.get(opts.deviceId)!;
+    id = identities.get(oldKey) ?? undefined;
+    if (id) {
+      // Migrate to current IP
+      identities.delete(oldKey);
+      identities.set(key, id);
+      for (const d of id.deviceIds) deviceToIpKey.set(d, key);
+    }
+  }
+
+  if (!id) {
+    const name = sanitizeName(opts.name);
+    if (!name) return { ok: false, error: "Enter a name (1–20 characters)." };
+    if (opts.mode === "team" && !isValidTeam(opts.team)) {
+      return { ok: false, error: "Pick a valid team/branch." };
+    }
+    id = {
+      name,
+      mode: opts.mode === "team" ? "team" : "free",
+      team: opts.mode === "team" && isValidTeam(opts.team) ? opts.team! : null,
+      teamLocked: opts.mode === "team" && isValidTeam(opts.team),
+      deviceIds: opts.deviceId ? [opts.deviceId] : [],
+      updatedAt: Date.now(),
+    };
+    identities.set(key, id);
+    if (opts.deviceId) deviceToIpKey.set(opts.deviceId, key);
+    saveIdentitiesSoon();
+    return { ok: true, identity: id };
+  }
+
+  // Existing identity — name is permanent for this IP
+  if (opts.deviceId && !id.deviceIds.includes(opts.deviceId)) {
+    id.deviceIds.push(opts.deviceId);
+    if (id.deviceIds.length > 12) id.deviceIds = id.deviceIds.slice(-12);
+    deviceToIpKey.set(opts.deviceId, key);
+  }
+
+  if (opts.mode === "free" || opts.mode === "team") {
+    id.mode = opts.mode;
+  }
+
+  if (opts.mode === "team") {
+    if (id.teamLocked && id.team) {
+      // Team cannot change once locked
+      if (opts.team && opts.team !== id.team) {
+        return {
+          ok: false,
+          error: "Team can't be changed.",
+          identity: id,
+        };
+      }
+      id.mode = "team";
+    } else if (isValidTeam(opts.team)) {
+      id.team = opts.team;
+      id.teamLocked = true;
+      id.mode = "team";
+    } else if (!id.team) {
+      return { ok: false, error: "Pick a valid team/branch.", identity: id };
+    }
+  } else if (opts.mode === "free") {
+    id.mode = "free";
+    // keep locked team on file for when they return to team mode
+  }
+
+  id.updatedAt = Date.now();
+  saveIdentitiesSoon();
+  return { ok: true, identity: id };
+}
+
 // ── State ────────────────────────────────────────────────
 
 const worlds: Record<GameMode, Map<string, Pixel>> = {
@@ -264,6 +427,7 @@ const worlds: Record<GameMode, Map<string, Pixel>> = {
 };
 const quotas = loadQuotas();
 const scores = loadScores();
+loadIdentities();
 
 function getOrCreateQuota(ip: string): IpQuota {
   let q = quotas.get(ip);
@@ -451,14 +615,12 @@ app.prepare().then(() => {
     emitScores();
   }
 
-  io.on("connection", (socket) => {
-    const ip = getClientIp(socket);
-    socket.data.ip = ip;
-    socket.data.mode = "free" as GameMode;
-
-    // Default hello = free world (client re-requests on mode pick)
-    const mode: GameMode = "free";
-    const hello: ServerHello = {
+  function buildHello(
+    ip: string,
+    mode: GameMode,
+    identity: StoredIdentity | null
+  ): ServerHello {
+    return {
       pixels: Array.from(worlds[mode].values()),
       gridWidth: GRID_WIDTH,
       gridHeight: GRID_HEIGHT,
@@ -471,72 +633,148 @@ app.prepare().then(() => {
       teamScores: teamScores(),
       freeScores: freeScores(),
       teams: TEAMS,
+      identity: identity ? toPublicIdentity(identity) : null,
     };
-    socket.emit("hello", hello);
-    socket.join(`mode:${mode}`);
+  }
+
+  io.on("connection", (socket) => {
+    const ip = getClientIp(socket);
+    socket.data.ip = ip;
+    socket.data.mode = "free" as GameMode;
+    socket.data.deviceId = null as string | null;
+
+    // Client may announce deviceId immediately via handshake auth
+    const authDevice =
+      typeof socket.handshake.auth?.deviceId === "string"
+        ? socket.handshake.auth.deviceId.slice(0, 64)
+        : null;
+    if (authDevice) socket.data.deviceId = authDevice;
+
+    const existing = findIdentity(ip, authDevice);
+    const startMode: GameMode = existing?.mode || "free";
+    socket.data.mode = startMode;
+    socket.data.team = existing?.team ?? null;
+
+    socket.emit("hello", buildHello(ip, startMode, existing));
+    socket.join(`mode:${startMode}`);
     broadcastOnline();
+    console.log(
+      `> connect ip=${ip} device=${authDevice || "-"} known=${Boolean(existing)} name=${existing?.name || "-"}`
+    );
+
+    /** Bind durable browser id (helps multi-tab; IP still primary across browsers) */
+    socket.on("helloDevice", (payload: { deviceId?: string }) => {
+      const d =
+        typeof payload?.deviceId === "string"
+          ? payload.deviceId.trim().slice(0, 64)
+          : null;
+      if (!d) return;
+      socket.data.deviceId = d;
+      const id = findIdentity(ip, d);
+      if (id) {
+        upsertIdentity(ip, { deviceId: d, mode: id.mode, team: id.team, name: id.name });
+        socket.emit("hello", buildHello(ip, id.mode, id));
+      }
+    });
 
     socket.on(
       "joinMode",
       (
-        payload: { mode: GameMode; team?: TeamId | null },
+        payload: {
+          mode: GameMode;
+          team?: TeamId | null;
+          name?: string;
+          deviceId?: string;
+        },
         ack?: (r: unknown) => void
       ) => {
         if (!isValidMode(payload?.mode)) {
           ack?.({ error: "Invalid mode" });
           return;
         }
-        const m = payload.mode;
-        if (m === "team") {
-          if (!isValidTeam(payload.team)) {
-            ack?.({ error: "Pick a valid team/branch." });
-            return;
+        const deviceId =
+          (typeof payload.deviceId === "string" && payload.deviceId.slice(0, 64)) ||
+          (socket.data.deviceId as string | null);
+        if (deviceId) socket.data.deviceId = deviceId;
+
+        const result = upsertIdentity(ip, {
+          name: payload.name,
+          mode: payload.mode,
+          team: payload.team,
+          deviceId,
+        });
+        if (!result.ok) {
+          ack?.({
+            error: result.error,
+            identity: result.identity
+              ? toPublicIdentity(result.identity)
+              : undefined,
+          });
+          if (result.identity) {
+            socket.emit(
+              "hello",
+              buildHello(ip, result.identity.mode, result.identity)
+            );
           }
+          return;
         }
+
+        const id = result.identity;
+        const m = id.mode;
         const prev = socket.data.mode as GameMode;
         socket.leave(`mode:${prev}`);
         socket.join(`mode:${m}`);
         socket.data.mode = m;
-        socket.data.team = m === "team" ? payload.team! : null;
+        socket.data.team = m === "team" ? id.team : null;
         console.log(
-          `> joinMode ${socket.id} ip=${socket.data.ip} mode=${m} team=${socket.data.team ?? "-"}`
+          `> joinMode ip=${ip} name=${id.name} mode=${m} team=${id.team ?? "-"} locked=${id.teamLocked}`
         );
 
-        const h: ServerHello = {
-          pixels: Array.from(worlds[m].values()),
-          gridWidth: GRID_WIDTH,
-          gridHeight: GRID_HEIGHT,
-          maxStars: MAX_STARS,
-          regenSeconds: REGEN_SECONDS,
-          onlineCount: io.engine.clientsCount,
-          palette: COLOR_PALETTE,
-          quota: quotaSnapshot(ip),
+        socket.emit("hello", buildHello(ip, m, id));
+        ack?.({
+          ok: true,
           mode: m,
-          teamScores: teamScores(),
-          freeScores: freeScores(),
-          teams: TEAMS,
-        };
-        socket.emit("hello", h);
-        ack?.({ ok: true, mode: m });
+          identity: toPublicIdentity(id),
+        });
       }
     );
 
     socket.on(
       "action",
       (payload: PlacePixelPayload, ack?: (r: unknown) => void) => {
-        const name = sanitizeName(payload?.name);
+        const clientIp = (socket.data.ip as string) || getClientIp(socket);
+        const bound = findIdentity(
+          clientIp,
+          socket.data.deviceId as string | null
+        );
+        // Prefer server-bound name for this IP (anti-rename spam)
+        let name = bound?.name || sanitizeName(payload?.name);
         if (!name) {
           ack?.({ error: "Enter a name (1–20 characters)." });
           return;
+        }
+        if (bound && bound.name !== name) {
+          name = bound.name; // force original name
         }
         if (!isValidMode(payload?.mode)) {
           ack?.({ error: "Invalid mode." });
           return;
         }
-        const mode = payload.mode;
-        const team: TeamId | null =
+        let mode = payload.mode;
+        let team: TeamId | null =
           mode === "team" && isValidTeam(payload.team) ? payload.team : null;
-        if (mode === "team" && !team) {
+
+        // Enforce locked team / identity mode consistency
+        if (bound) {
+          if (mode === "team") {
+            if (bound.teamLocked && bound.team) {
+              team = bound.team;
+            } else if (!team) {
+              ack?.({ error: "Pick a team for Team Mode." });
+              return;
+            }
+          }
+        } else if (mode === "team" && !team) {
           ack?.({ error: "Pick a team for Team Mode." });
           return;
         }
@@ -556,7 +794,6 @@ app.prepare().then(() => {
         }
 
         const tool: ToolId = payload.tool || "paint";
-        const clientIp = (socket.data.ip as string) || getClientIp(socket);
         const now = Date.now();
         const world = worlds[mode];
 

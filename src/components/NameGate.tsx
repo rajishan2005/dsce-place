@@ -139,6 +139,9 @@ export default function NameGate({ onJoin }: NameGateProps) {
               <p className="mt-1.5 text-[10px] text-white/30">
                 Your whole branch shares one paint color.
               </p>
+              <p className="mt-1 text-[10px] font-bold text-red-500">
+                Can&apos;t be changed after join
+              </p>
             </div>
           )}
 
