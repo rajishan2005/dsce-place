@@ -9,6 +9,7 @@ Collaborative real-time pixel canvas over **Dayananda Sagar College of Engineeri
 - **Real-time sync** via Socket.IO (all users see pixels instantly)
 - **Name only** — no account; name is saved in the browser
 - **★ Star bank** — 30 stars per IP; paint costs 1; +1 star every 30s (regen starts the moment you paint)
+- **GPS “you are here”** — maps phone location onto the campus grid (approximate; tune bounds)
 - **Persistent canvas** — pixels in `data/pixels.json`, quotas in `data/quotas.json`
 
 ## Quick start
@@ -55,6 +56,8 @@ Edit `src/lib/config.ts`:
 
 Background image: `public/campus-satellite.jpg`  
 Replace this file with your own campus map (same filename) to change the backdrop.
+
+**GPS / map sync:** edit `CAMPUS_BOUNDS` in `src/lib/config.ts` so the artwork edges match real lat/lng (north-up). Your map art is not a survey photo — walk to the main gate and a far corner and nudge west/east/north/south until the blue dot sits correctly. HTTPS is required for browser GPS (Railway provides this).
 
 **Limits:** tracked by client **IP** (works behind Railway via `X-Forwarded-For`). Changing display name does not reset free pixels or cooldown.
 

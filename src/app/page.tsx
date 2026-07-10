@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import NameGate from "@/components/NameGate";
-import PixelCanvas from "@/components/PixelCanvas";
+import PixelCanvas, { type PixelCanvasHandle } from "@/components/PixelCanvas";
 import ColorPalette from "@/components/ColorPalette";
 import {
   COLOR_PALETTE,
@@ -13,6 +13,11 @@ import {
   REGEN_SECONDS,
 } from "@/lib/config";
 import type { Pixel, QuotaUpdate, ServerHello } from "@/lib/types";
+import { useGeolocation } from "@/hooks/useGeolocation";
+import {
+  formatDistanceFromCampus,
+  latLngToGrid,
+} from "@/lib/geo";
 
 const NAME_KEY = "dsce-place-name";
 
@@ -36,6 +41,9 @@ export default function Home() {
   const [palette, setPalette] = useState<readonly string[]>(COLOR_PALETTE);
   const [grid, setGrid] = useState({ w: GRID_WIDTH, h: GRID_HEIGHT });
   const [hudOpen, setHudOpen] = useState(true);
+  const canvasRef = useRef<PixelCanvasHandle>(null);
+  const gps = useGeolocation(false);
+  const lastCentered = useRef(false);
 
   useEffect(() => {
     const saved = localStorage.getItem(NAME_KEY);
@@ -165,11 +173,55 @@ export default function Home() {
   const pixelCount = pixels.size;
   const isFull = stars >= maxStars;
 
+  const geoGrid = useMemo(() => {
+    if (!gps.position) return null;
+    return latLngToGrid(gps.position.lat, gps.position.lng);
+  }, [gps.position]);
+
+  // First GPS fix → center map on user
+  useEffect(() => {
+    if (!gps.position || !geoGrid || lastCentered.current) return;
+    lastCentered.current = true;
+    canvasRef.current?.centerOn(geoGrid.x, geoGrid.y);
+    if (!geoGrid.onCampus) {
+      showToast(formatDistanceFromCampus(gps.position.lat, gps.position.lng));
+    }
+  }, [gps.position, geoGrid, showToast]);
+
+  const handleLocate = () => {
+    if (gps.status === "tracking" && geoGrid) {
+      canvasRef.current?.centerOn(geoGrid.x, geoGrid.y);
+      if (!geoGrid.onCampus && gps.position) {
+        showToast(formatDistanceFromCampus(gps.position.lat, gps.position.lng));
+      } else {
+        showToast("Centered on you");
+      }
+      return;
+    }
+    if (gps.status === "denied") {
+      showToast("Enable location permission in browser settings");
+      return;
+    }
+    lastCentered.current = false;
+    gps.start();
+    showToast("Requesting GPS…");
+  };
+
   const statusLabel = useMemo(() => {
     if (status === "live") return "LIVE";
     if (status === "connecting") return "SYNC…";
     return "OFFLINE";
   }, [status]);
+
+  const gpsLabel = useMemo(() => {
+    if (gps.status === "tracking" && geoGrid) {
+      return geoGrid.onCampus ? "ON CAMPUS" : "NEARBY";
+    }
+    if (gps.status === "requesting") return "GPS…";
+    if (gps.status === "denied") return "NO GPS";
+    if (gps.status === "error" || gps.status === "unavailable") return "GPS OFF";
+    return "GPS";
+  }, [gps.status, geoGrid]);
 
   const regenProgress =
     !isFull && regenSeconds > 0
@@ -193,12 +245,14 @@ export default function Home() {
 
       {/* Full-screen map */}
       <PixelCanvas
+        ref={canvasRef}
         gridWidth={grid.w}
         gridHeight={grid.h}
         pixels={pixels}
         selectedColor={selectedColor}
         canPlace={canPlace}
         onPlace={handlePlace}
+        userLocation={gps.position}
         onHover={(p, x, y) => {
           setHoverPixel(p);
           setHoverCell({ x, y });
@@ -238,6 +292,49 @@ export default function Home() {
               {statusLabel}
             </div>
           </div>
+
+          {/* Locate me */}
+          <button
+            type="button"
+            onClick={handleLocate}
+            className={`hud-panel flex items-center gap-1.5 px-2.5 py-1.5 text-left transition hover:brightness-110 active:scale-[0.98] ${
+              gps.status === "tracking"
+                ? "ring-1 ring-sky-400/40"
+                : ""
+            }`}
+            title="Show my GPS location on the campus map"
+          >
+            <span
+              className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${
+                gps.status === "tracking"
+                  ? "bg-sky-500/30 text-sky-300"
+                  : "bg-white/10 text-white/70"
+              }`}
+            >
+              ◎
+            </span>
+            <div className="leading-none">
+              <div className="text-[10px] font-bold tracking-wide text-sky-100">
+                {gps.status === "tracking" ? "My location" : "Locate me"}
+              </div>
+              <div
+                className={`mt-0.5 text-[8px] font-semibold uppercase tracking-wider ${
+                  geoGrid?.onCampus
+                    ? "text-emerald-400/90"
+                    : gps.status === "tracking"
+                      ? "text-amber-300/80"
+                      : "text-white/35"
+                }`}
+              >
+                {gpsLabel}
+                {gps.position && (
+                  <span className="ml-1 font-mono normal-case tracking-normal text-white/30">
+                    ±{Math.round(gps.position.accuracy)}m
+                  </span>
+                )}
+              </div>
+            </div>
+          </button>
 
           {hoverPixel && (
             <div className="hud-panel px-2 py-1 text-[9px] text-slate-300">
@@ -357,7 +454,7 @@ export default function Home() {
             />
           )}
           <p className="mt-1.5 text-center text-[8px] text-white/25">
-            Scroll zoom · Pinch · Drag pan · Double‑click reset · Tap to paint
+            Scroll zoom · Pinch · Drag · Locate me (GPS) · Tap to paint
           </p>
         </div>
       </div>

@@ -18,15 +18,20 @@ export const COOLDOWN_SECONDS = REGEN_SECONDS;
 export const MAX_NAME_LENGTH = 20;
 
 /**
- * Approximate bounds of DSCE main campus (Kumaraswamy Layout, Bengaluru).
- * Used for documentation and satellite export; canvas is a fixed grid over this area.
+ * Geo bounds of the pixel canvas over DSCE (Kumaraswamy Layout, Bengaluru).
+ * Tuned to ~main DSI campus around 12.9095°N, 77.5668°E.
+ *
+ * IMPORTANT: Your campus artwork is illustrative, not a survey map.
+ * If the blue GPS dot is off, nudge these edges while standing at known gates/buildings.
+ * west/east = left/right of image · north/south = top/bottom of image (north-up).
  */
 export const CAMPUS_BOUNDS = {
-  west: 77.5625,
-  south: 12.9055,
-  east: 77.5705,
-  north: 12.9125,
-  center: { lat: 12.909, lng: 77.5665 },
+  west: 77.5642,
+  south: 12.9070,
+  east: 77.5696,
+  north: 12.9119,
+  /** Official-ish campus pin */
+  center: { lat: 12.909477, lng: 77.566833 },
 } as const;
 
 /** r/place-style palette */
