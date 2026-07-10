@@ -1,4 +1,4 @@
-/** DSCE Kumaraswamy Layout — shared client/server config */
+/** DSCE Place — shared client/server config */
 
 export const GRID_WIDTH = 200;
 export const GRID_HEIGHT = 200;
@@ -6,33 +6,66 @@ export const GRID_HEIGHT = 200;
 /** Max stars (paint charges) per IP */
 export const MAX_STARS = 30;
 
-/** Seconds to regenerate 1 star after spending (timer starts immediately on paint) */
+/** Seconds to regenerate 1 star after spending */
 export const REGEN_SECONDS = 30;
 
-/** @deprecated use MAX_STARS */
 export const FREE_PIXELS = MAX_STARS;
-/** @deprecated use REGEN_SECONDS */
 export const COOLDOWN_SECONDS = REGEN_SECONDS;
 
-/** Max display name length */
 export const MAX_NAME_LENGTH = 20;
 
-/**
- * Geo bounds of the pixel canvas over DSCE (Kumaraswamy Layout, Bengaluru).
- * Tuned to ~main DSI campus around 12.9095°N, 77.5668°E.
- *
- * IMPORTANT: Your campus artwork is illustrative, not a survey map.
- * If the blue GPS dot is off, nudge these edges while standing at known gates/buildings.
- * west/east = left/right of image · north/south = top/bottom of image (north-up).
- */
-export const CAMPUS_BOUNDS = {
-  west: 77.5642,
-  south: 12.9070,
-  east: 77.5696,
-  north: 12.9119,
-  /** Official-ish campus pin */
-  center: { lat: 12.909477, lng: 77.566833 },
+/** Game modes */
+export type GameMode = "free" | "team";
+
+export const TEAMS = [
+  "ISE",
+  "CSE",
+  "AIML",
+  "ECE",
+  "EEE",
+  "Mechanical",
+  "Civil",
+  "Other",
+] as const;
+
+export type TeamId = (typeof TEAMS)[number];
+
+/** Power-up costs (stars) and effects */
+export const POWERUPS = {
+  bomb: {
+    id: "bomb" as const,
+    label: "Paint Bomb",
+    cost: 5,
+    /** half-size: 5×5 → radius 2 */
+    radius: 2,
+  },
+  multiplier: {
+    id: "multiplier" as const,
+    label: "Paint Multiplier",
+    cost: 3,
+    durationMs: 20_000,
+    /** points per pixel while active (team/free score) */
+    scorePerPixel: 2,
+  },
+  wave: {
+    id: "wave" as const,
+    label: "Ink Wave",
+    cost: 3,
+    length: 10,
+  },
 } as const;
+
+export type PowerupId = keyof typeof POWERUPS;
+
+export type WaveDir = "up" | "down" | "left" | "right";
+
+export const WAVE_DIRS: WaveDir[] = ["up", "down", "left", "right"];
+
+/** Eraser costs 1 star (not a power-up) */
+export const ERASER_COST = 1;
+
+/** Default points per normal paint */
+export const BASE_SCORE_PER_PIXEL = 1;
 
 /** r/place-style palette */
 export const COLOR_PALETTE = [

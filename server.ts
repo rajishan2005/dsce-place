@@ -1,6 +1,6 @@
 /**
- * Custom Next.js + Socket.IO server for real-time DSCE pixel canvas.
- * Stars: max 30 per IP. Paint spends 1 star; regen of +1 star / 30s starts immediately.
+ * DSCE Place — multiplayer pixel canvas
+ * Stars, free/team modes, eraser, power-ups. No GPS.
  */
 import { createServer } from "http";
 import { parse } from "url";
@@ -15,39 +15,58 @@ import {
   REGEN_SECONDS,
   MAX_NAME_LENGTH,
   COLOR_PALETTE,
+  TEAMS,
+  POWERUPS,
+  ERASER_COST,
+  BASE_SCORE_PER_PIXEL,
+  type GameMode,
+  type TeamId,
+  type WaveDir,
 } from "./src/lib/config";
+import { bombCells, waveCells } from "./src/lib/gridOps";
 import type {
   Pixel,
   PlacePixelPayload,
   QuotaUpdate,
   ServerHello,
+  TeamScoreRow,
+  FreeScoreRow,
+  PixelsBatchEvent,
+  ScoresUpdate,
+  ToolId,
 } from "./src/lib/types";
 
 const dev = process.env.NODE_ENV !== "production";
-// Always bind to all interfaces. Do NOT use process.env.HOSTNAME — on Railway/Docker
-// that is the container name, which causes "Application failed to respond".
 const hostname = process.env.HOST || "0.0.0.0";
 const port = parseInt(process.env.PORT || "3000", 10);
 
 const DATA_DIR = path.join(process.cwd(), "data");
-const PIXELS_FILE = path.join(DATA_DIR, "pixels.json");
-const QUOTAS_FILE = path.join(DATA_DIR, "quotas.json");
 const REGEN_MS = REGEN_SECONDS * 1000;
 
-// --- Persistence ---
+// ── Persistence ──────────────────────────────────────────
 
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function loadPixels(): Map<string, Pixel> {
+function worldFile(mode: GameMode) {
+  return path.join(DATA_DIR, `pixels-${mode}.json`);
+}
+
+function loadWorld(mode: GameMode): Map<string, Pixel> {
   ensureDataDir();
   const map = new Map<string, Pixel>();
-  if (!fs.existsSync(PIXELS_FILE)) return map;
+  const file = worldFile(mode);
+  // migrate legacy single file into free mode once
+  const legacy = path.join(DATA_DIR, "pixels.json");
+  const pathToRead = fs.existsSync(file)
+    ? file
+    : mode === "free" && fs.existsSync(legacy)
+      ? legacy
+      : null;
+  if (!pathToRead) return map;
   try {
-    const raw = JSON.parse(fs.readFileSync(PIXELS_FILE, "utf-8")) as Pixel[];
+    const raw = JSON.parse(fs.readFileSync(pathToRead, "utf-8")) as Pixel[];
     for (const p of raw) {
       if (
         typeof p.x === "number" &&
@@ -57,86 +76,118 @@ function loadPixels(): Map<string, Pixel> {
         p.y >= 0 &&
         p.y < GRID_HEIGHT
       ) {
-        map.set(`${p.x},${p.y}`, p);
+        map.set(`${p.x},${p.y}`, {
+          ...p,
+          mode,
+          team: mode === "team" ? (p.team as TeamId) ?? null : null,
+        });
       }
     }
   } catch {
-    console.warn("Could not load pixels.json — starting empty");
+    console.warn(`Could not load ${pathToRead}`);
   }
   return map;
 }
 
-/**
- * Star bank per IP.
- * - stars: current charges (0..MAX_STARS)
- * - regenStartedAt: ms timestamp when the current regen cycle began
- *   (only meaningful when stars < MAX_STARS)
- */
 interface IpQuota {
   stars: number;
   regenStartedAt: number;
+  multiplierUntil: number;
 }
 
 function loadQuotas(): Map<string, IpQuota> {
   ensureDataDir();
   const map = new Map<string, IpQuota>();
-  if (!fs.existsSync(QUOTAS_FILE)) return map;
+  const file = path.join(DATA_DIR, "quotas.json");
+  if (!fs.existsSync(file)) return map;
   try {
-    const raw = JSON.parse(fs.readFileSync(QUOTAS_FILE, "utf-8")) as Record<
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<
       string,
-      // support new + legacy formats
-      IpQuota & { placedCount?: number; lastPlaceAt?: number }
+      IpQuota & { placedCount?: number }
     >;
     for (const [ip, q] of Object.entries(raw)) {
       if (!q || typeof q !== "object") continue;
-
-      // New star format
       if (typeof q.stars === "number") {
         map.set(ip, {
           stars: Math.min(MAX_STARS, Math.max(0, q.stars)),
           regenStartedAt:
-            typeof q.regenStartedAt === "number" ? q.regenStartedAt : Date.now(),
+            typeof q.regenStartedAt === "number" ? q.regenStartedAt : 0,
+          multiplierUntil:
+            typeof q.multiplierUntil === "number" ? q.multiplierUntil : 0,
         });
-        continue;
-      }
-
-      // Legacy: placedCount free-pool model → convert remaining free into stars
-      if (typeof q.placedCount === "number") {
-        const remaining = Math.max(0, MAX_STARS - q.placedCount);
+      } else if (typeof q.placedCount === "number") {
         map.set(ip, {
-          stars: remaining,
-          regenStartedAt: remaining < MAX_STARS ? Date.now() : 0,
+          stars: Math.max(0, MAX_STARS - q.placedCount),
+          regenStartedAt: 0,
+          multiplierUntil: 0,
         });
       }
     }
   } catch {
-    console.warn("Could not load quotas.json — starting empty");
+    console.warn("Could not load quotas.json");
   }
   return map;
 }
 
-let savePixelsTimer: ReturnType<typeof setTimeout> | null = null;
-let saveQuotasTimer: ReturnType<typeof setTimeout> | null = null;
+/** Personal score tallies (free mode) name → score */
+type ScoreBook = {
+  /** team → score points */
+  teamScore: Map<TeamId, number>;
+  /** free mode name → score */
+  freeScore: Map<string, number>;
+};
 
-function scheduleSavePixels(pixelMap: Map<string, Pixel>) {
-  if (savePixelsTimer) clearTimeout(savePixelsTimer);
-  savePixelsTimer = setTimeout(() => {
-    ensureDataDir();
-    fs.writeFileSync(PIXELS_FILE, JSON.stringify(Array.from(pixelMap.values())));
-  }, 500);
+function loadScores(): ScoreBook {
+  ensureDataDir();
+  const file = path.join(DATA_DIR, "scores.json");
+  const book: ScoreBook = {
+    teamScore: new Map(),
+    freeScore: new Map(),
+  };
+  if (!fs.existsSync(file)) return book;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as {
+      teamScore?: Record<string, number>;
+      freeScore?: Record<string, number>;
+    };
+    for (const [k, v] of Object.entries(raw.teamScore || {})) {
+      if (TEAMS.includes(k as TeamId)) book.teamScore.set(k as TeamId, v);
+    }
+    for (const [k, v] of Object.entries(raw.freeScore || {})) {
+      book.freeScore.set(k, v);
+    }
+  } catch {
+    /* empty */
+  }
+  return book;
 }
 
-function scheduleSaveQuotas(quotaMap: Map<string, IpQuota>) {
-  if (saveQuotasTimer) clearTimeout(saveQuotasTimer);
-  saveQuotasTimer = setTimeout(() => {
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePersist() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
     ensureDataDir();
-    const obj: Record<string, IpQuota> = {};
-    for (const [ip, q] of quotaMap) obj[ip] = q;
-    fs.writeFileSync(QUOTAS_FILE, JSON.stringify(obj));
-  }, 500);
+    for (const mode of ["free", "team"] as GameMode[]) {
+      fs.writeFileSync(
+        worldFile(mode),
+        JSON.stringify(Array.from(worlds[mode].values()))
+      );
+    }
+    const qObj: Record<string, IpQuota> = {};
+    for (const [ip, q] of quotas) qObj[ip] = q;
+    fs.writeFileSync(path.join(DATA_DIR, "quotas.json"), JSON.stringify(qObj));
+    const scoresObj = {
+      teamScore: Object.fromEntries(scores.teamScore),
+      freeScore: Object.fromEntries(scores.freeScore),
+    };
+    fs.writeFileSync(
+      path.join(DATA_DIR, "scores.json"),
+      JSON.stringify(scoresObj)
+    );
+  }, 600);
 }
 
-// --- Validation ---
+// ── Validation ───────────────────────────────────────────
 
 function sanitizeName(name: unknown): string | null {
   if (typeof name !== "string") return null;
@@ -153,6 +204,14 @@ function isValidColor(color: unknown): color is string {
   );
 }
 
+function isValidMode(m: unknown): m is GameMode {
+  return m === "free" || m === "team";
+}
+
+function isValidTeam(t: unknown): t is TeamId {
+  return typeof t === "string" && (TEAMS as readonly string[]).includes(t);
+}
+
 function getClientIp(socket: Socket): string {
   const headers = socket.handshake.headers;
   const forwarded = headers["x-forwarded-for"];
@@ -163,9 +222,7 @@ function getClientIp(socket: Socket): string {
     return forwarded[0].split(",")[0]!.trim();
   }
   const realIp = headers["x-real-ip"];
-  if (typeof realIp === "string" && realIp.length > 0) {
-    return realIp.trim();
-  }
+  if (typeof realIp === "string" && realIp.length > 0) return realIp.trim();
   const addr =
     socket.handshake.address ||
     socket.request.socket?.remoteAddress ||
@@ -173,21 +230,24 @@ function getClientIp(socket: Socket): string {
   return addr.replace(/^::ffff:/, "");
 }
 
-// --- Star bank ---
+// ── State ────────────────────────────────────────────────
 
-const pixels = loadPixels();
+const worlds: Record<GameMode, Map<string, Pixel>> = {
+  free: loadWorld("free"),
+  team: loadWorld("team"),
+};
 const quotas = loadQuotas();
+const scores = loadScores();
 
 function getOrCreateQuota(ip: string): IpQuota {
   let q = quotas.get(ip);
   if (!q) {
-    q = { stars: MAX_STARS, regenStartedAt: 0 };
+    q = { stars: MAX_STARS, regenStartedAt: 0, multiplierUntil: 0 };
     quotas.set(ip, q);
   }
   return q;
 }
 
-/** Apply passive regen based on elapsed time. Mutates quota. */
 function refreshStars(q: IpQuota, now: number): void {
   if (q.stars >= MAX_STARS) {
     q.stars = MAX_STARS;
@@ -195,22 +255,17 @@ function refreshStars(q: IpQuota, now: number): void {
     return;
   }
   if (!q.regenStartedAt) {
-    // Should be regenerating but timer missing — start now
     q.regenStartedAt = now;
     return;
   }
-
   const elapsed = now - q.regenStartedAt;
   if (elapsed < REGEN_MS) return;
-
   const gained = Math.floor(elapsed / REGEN_MS);
   q.stars = Math.min(MAX_STARS, q.stars + gained);
-
   if (q.stars >= MAX_STARS) {
     q.stars = MAX_STARS;
     q.regenStartedAt = 0;
   } else {
-    // Keep remainder of current cycle so regen stays continuous
     q.regenStartedAt += gained * REGEN_MS;
   }
 }
@@ -218,9 +273,7 @@ function refreshStars(q: IpQuota, now: number): void {
 function nextStarInSeconds(q: IpQuota, now: number): number {
   if (q.stars >= MAX_STARS || !q.regenStartedAt) return 0;
   const remainingMs = REGEN_MS - ((now - q.regenStartedAt) % REGEN_MS);
-  // If exactly on boundary, refreshStars should have applied; clamp 1..REGEN
-  const sec = Math.ceil(remainingMs / 1000);
-  return Math.min(REGEN_SECONDS, Math.max(1, sec));
+  return Math.min(REGEN_SECONDS, Math.max(1, Math.ceil(remainingMs / 1000)));
 }
 
 function quotaSnapshot(ip: string, now = Date.now()): QuotaUpdate {
@@ -233,45 +286,114 @@ function quotaSnapshot(ip: string, now = Date.now()): QuotaUpdate {
     regenSeconds: REGEN_SECONDS,
     nextStarIn: isFull ? 0 : nextStarInSeconds(q, now),
     isFull,
+    multiplierUntil: q.multiplierUntil > now ? q.multiplierUntil : 0,
   };
 }
 
-/**
- * Spend 1 star. Starts regen timer immediately if bank was full.
- * Returns null if not enough stars.
- */
-function trySpendStar(
+function trySpendStars(
   ip: string,
+  cost: number,
   now: number
 ): { ok: true; quota: QuotaUpdate } | { ok: false; quota: QuotaUpdate } {
   const q = getOrCreateQuota(ip);
   refreshStars(q, now);
-
-  if (q.stars < 1) {
-    return { ok: false, quota: quotaSnapshot(ip, now) };
-  }
-
+  if (q.stars < cost) return { ok: false, quota: quotaSnapshot(ip, now) };
   const wasFull = q.stars >= MAX_STARS;
-  q.stars -= 1;
-
-  // Regen starts the moment you leave full bank
-  if (wasFull || !q.regenStartedAt) {
-    q.regenStartedAt = now;
-  }
-
-  scheduleSaveQuotas(quotas);
+  q.stars -= cost;
+  if (wasFull || !q.regenStartedAt) q.regenStartedAt = now;
+  schedulePersist();
   return { ok: true, quota: quotaSnapshot(ip, now) };
 }
 
-// --- Boot ---
+function pixelScore(ip: string, now: number): number {
+  const q = getOrCreateQuota(ip);
+  if (q.multiplierUntil > now) return POWERUPS.multiplier.scorePerPixel;
+  return BASE_SCORE_PER_PIXEL;
+}
+
+function addScore(
+  mode: GameMode,
+  name: string,
+  team: TeamId | null | undefined,
+  points: number
+) {
+  if (points <= 0) return;
+  if (mode === "team" && team && isValidTeam(team)) {
+    scores.teamScore.set(team, (scores.teamScore.get(team) || 0) + points);
+  } else if (mode === "free") {
+    scores.freeScore.set(name, (scores.freeScore.get(name) || 0) + points);
+  }
+}
+
+function teamScores(): TeamScoreRow[] {
+  const world = worlds.team;
+  const counts = new Map<TeamId, number>();
+  for (const t of TEAMS) counts.set(t, 0);
+  for (const p of world.values()) {
+    if (p.team && counts.has(p.team as TeamId)) {
+      counts.set(p.team as TeamId, (counts.get(p.team as TeamId) || 0) + 1);
+    }
+  }
+  const total = GRID_WIDTH * GRID_HEIGHT;
+  return TEAMS.map((team) => {
+    const pixels = counts.get(team) || 0;
+    return {
+      team,
+      pixels,
+      score: scores.teamScore.get(team) || 0,
+      percent: Math.round((pixels / total) * 10000) / 100,
+    };
+  }).sort((a, b) => b.score - a.score || b.pixels - a.pixels);
+}
+
+function freeScores(): FreeScoreRow[] {
+  const world = worlds.free;
+  const counts = new Map<string, number>();
+  for (const p of world.values()) {
+    counts.set(p.name, (counts.get(p.name) || 0) + 1);
+  }
+  const rows: FreeScoreRow[] = [];
+  const names = new Set([...counts.keys(), ...scores.freeScore.keys()]);
+  for (const name of names) {
+    rows.push({
+      name,
+      pixels: counts.get(name) || 0,
+      score: scores.freeScore.get(name) || 0,
+    });
+  }
+  return rows.sort((a, b) => b.score - a.score || b.pixels - a.pixels).slice(0, 20);
+}
+
+function paintCell(
+  mode: GameMode,
+  x: number,
+  y: number,
+  color: string,
+  name: string,
+  team: TeamId | null,
+  now: number
+): Pixel {
+  const pixel: Pixel = {
+    x,
+    y,
+    color,
+    name,
+    placedAt: now,
+    mode,
+    team: mode === "team" ? team : null,
+  };
+  worlds[mode].set(`${x},${y}`, pixel);
+  return pixel;
+}
+
+// ── Boot ─────────────────────────────────────────────────
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
   const httpServer = createServer((req, res) => {
-    const parsedUrl = parse(req.url!, true);
-    handle(req, res, parsedUrl);
+    handle(req, res, parse(req.url!, true));
   });
 
   const io = new SocketIOServer(httpServer, {
@@ -283,12 +405,31 @@ app.prepare().then(() => {
     io.emit("online", { count: io.engine.clientsCount });
   }
 
+  function emitScores() {
+    const payload: ScoresUpdate = {
+      mode: "team",
+      teamScores: teamScores(),
+      freeScores: freeScores(),
+    };
+    io.emit("scores", payload);
+  }
+
+  function emitBatch(batch: PixelsBatchEvent) {
+    // Room per mode for efficient sync
+    io.to(`mode:${batch.mode}`).emit("pixels", batch);
+    // Also emit scores when territory changes
+    emitScores();
+  }
+
   io.on("connection", (socket) => {
     const ip = getClientIp(socket);
     socket.data.ip = ip;
+    socket.data.mode = "free" as GameMode;
 
+    // Default hello = free world (client re-requests on mode pick)
+    const mode: GameMode = "free";
     const hello: ServerHello = {
-      pixels: Array.from(pixels.values()),
+      pixels: Array.from(worlds[mode].values()),
       gridWidth: GRID_WIDTH,
       gridHeight: GRID_HEIGHT,
       maxStars: MAX_STARS,
@@ -296,69 +437,235 @@ app.prepare().then(() => {
       onlineCount: io.engine.clientsCount,
       palette: COLOR_PALETTE,
       quota: quotaSnapshot(ip),
+      mode,
+      teamScores: teamScores(),
+      freeScores: freeScores(),
+      teams: TEAMS,
     };
     socket.emit("hello", hello);
+    socket.join(`mode:${mode}`);
     broadcastOnline();
 
-    socket.on("place", (payload: PlacePixelPayload, ack?: (res: unknown) => void) => {
-      const name = sanitizeName(payload?.name);
-      if (!name) {
-        ack?.({ error: "Enter a name (1–20 characters)." });
-        return;
+    socket.on(
+      "joinMode",
+      (
+        payload: { mode: GameMode; team?: TeamId | null },
+        ack?: (r: unknown) => void
+      ) => {
+        if (!isValidMode(payload?.mode)) {
+          ack?.({ error: "Invalid mode" });
+          return;
+        }
+        const m = payload.mode;
+        if (m === "team" && payload.team && !isValidTeam(payload.team)) {
+          ack?.({ error: "Invalid team" });
+          return;
+        }
+        const prev = socket.data.mode as GameMode;
+        socket.leave(`mode:${prev}`);
+        socket.join(`mode:${m}`);
+        socket.data.mode = m;
+        socket.data.team = m === "team" ? payload.team ?? null : null;
+
+        const h: ServerHello = {
+          pixels: Array.from(worlds[m].values()),
+          gridWidth: GRID_WIDTH,
+          gridHeight: GRID_HEIGHT,
+          maxStars: MAX_STARS,
+          regenSeconds: REGEN_SECONDS,
+          onlineCount: io.engine.clientsCount,
+          palette: COLOR_PALETTE,
+          quota: quotaSnapshot(ip),
+          mode: m,
+          teamScores: teamScores(),
+          freeScores: freeScores(),
+          teams: TEAMS,
+        };
+        socket.emit("hello", h);
+        ack?.({ ok: true, mode: m });
       }
+    );
 
-      const x = Number(payload?.x);
-      const y = Number(payload?.y);
-      if (
-        !Number.isInteger(x) ||
-        !Number.isInteger(y) ||
-        x < 0 ||
-        y < 0 ||
-        x >= GRID_WIDTH ||
-        y >= GRID_HEIGHT
-      ) {
-        ack?.({ error: "Invalid pixel coordinates." });
-        return;
-      }
+    socket.on(
+      "action",
+      (payload: PlacePixelPayload, ack?: (r: unknown) => void) => {
+        const name = sanitizeName(payload?.name);
+        if (!name) {
+          ack?.({ error: "Enter a name (1–20 characters)." });
+          return;
+        }
+        if (!isValidMode(payload?.mode)) {
+          ack?.({ error: "Invalid mode." });
+          return;
+        }
+        const mode = payload.mode;
+        const team: TeamId | null =
+          mode === "team" && isValidTeam(payload.team) ? payload.team : null;
+        if (mode === "team" && !team) {
+          ack?.({ error: "Pick a team for Team Mode." });
+          return;
+        }
 
-      if (!isValidColor(payload?.color)) {
-        ack?.({ error: "Pick a color from the palette." });
-        return;
-      }
+        const x = Number(payload?.x);
+        const y = Number(payload?.y);
+        if (
+          !Number.isInteger(x) ||
+          !Number.isInteger(y) ||
+          x < 0 ||
+          y < 0 ||
+          x >= GRID_WIDTH ||
+          y >= GRID_HEIGHT
+        ) {
+          ack?.({ error: "Invalid coordinates." });
+          return;
+        }
 
-      const clientIp = (socket.data.ip as string) || getClientIp(socket);
-      const now = Date.now();
-      const spend = trySpendStar(clientIp, now);
+        const tool: ToolId = payload.tool || "paint";
+        const clientIp = (socket.data.ip as string) || getClientIp(socket);
+        const now = Date.now();
+        const world = worlds[mode];
 
-      if (!spend.ok) {
-        const wait = spend.quota.nextStarIn;
-        ack?.({
-          error: wait
-            ? `No stars left. Next star in ${wait}s.`
-            : "No stars left.",
-          nextStarIn: wait,
-          stars: spend.quota.stars,
-          quota: spend.quota,
+        // ── Multiplier activate ──
+        if (tool === "multiplier") {
+          const spend = trySpendStars(clientIp, POWERUPS.multiplier.cost, now);
+          if (!spend.ok) {
+            ack?.({
+              error: `Need ${POWERUPS.multiplier.cost} stars.`,
+              quota: spend.quota,
+            });
+            socket.emit("quota", spend.quota);
+            return;
+          }
+          const q = getOrCreateQuota(clientIp);
+          q.multiplierUntil = now + POWERUPS.multiplier.durationMs;
+          schedulePersist();
+          const quota = quotaSnapshot(clientIp, now);
+          socket.emit("quota", quota);
+          ack?.({ ok: true, quota, multiplierUntil: q.multiplierUntil });
+          return;
+        }
+
+        // ── Eraser ──
+        if (tool === "eraser") {
+          const spend = trySpendStars(clientIp, ERASER_COST, now);
+          if (!spend.ok) {
+            ack?.({ error: "Need 1 star to erase.", quota: spend.quota });
+            socket.emit("quota", spend.quota);
+            return;
+          }
+          const key = `${x},${y}`;
+          const existed = world.has(key);
+          if (existed) world.delete(key);
+          schedulePersist();
+          emitBatch({
+            mode,
+            erased: [{ x, y }],
+            fx: { type: "erase", x, y, points: 0 },
+          });
+          socket.emit("quota", spend.quota);
+          ack?.({ ok: true, quota: spend.quota, erased: true });
+          return;
+        }
+
+        // ── Paint / Bomb / Wave need color ──
+        if (!isValidColor(payload?.color)) {
+          ack?.({ error: "Pick a color from the palette." });
+          return;
+        }
+        const color = payload.color;
+
+        if (tool === "bomb") {
+          const spend = trySpendStars(clientIp, POWERUPS.bomb.cost, now);
+          if (!spend.ok) {
+            ack?.({
+              error: `Need ${POWERUPS.bomb.cost} stars for bomb.`,
+              quota: spend.quota,
+            });
+            socket.emit("quota", spend.quota);
+            return;
+          }
+          const cells = bombCells(x, y, POWERUPS.bomb.radius);
+          const painted: Pixel[] = [];
+          const ptsEach = pixelScore(clientIp, now);
+          let totalPts = 0;
+          for (const c of cells) {
+            painted.push(paintCell(mode, c.x, c.y, color, name, team, now));
+            totalPts += ptsEach;
+          }
+          addScore(mode, name, team, totalPts);
+          schedulePersist();
+          emitBatch({
+            mode,
+            pixels: painted,
+            fx: { type: "bomb", x, y, color, points: totalPts },
+          });
+          socket.emit("quota", spend.quota);
+          ack?.({ ok: true, quota: spend.quota, count: painted.length, points: totalPts });
+          return;
+        }
+
+        if (tool === "wave") {
+          const dir = payload.dir as WaveDir;
+          if (!["up", "down", "left", "right"].includes(dir)) {
+            ack?.({ error: "Pick a wave direction." });
+            return;
+          }
+          const spend = trySpendStars(clientIp, POWERUPS.wave.cost, now);
+          if (!spend.ok) {
+            ack?.({
+              error: `Need ${POWERUPS.wave.cost} stars for wave.`,
+              quota: spend.quota,
+            });
+            socket.emit("quota", spend.quota);
+            return;
+          }
+          const cells = waveCells(x, y, dir, POWERUPS.wave.length);
+          const painted: Pixel[] = [];
+          const ptsEach = pixelScore(clientIp, now);
+          let totalPts = 0;
+          for (const c of cells) {
+            painted.push(paintCell(mode, c.x, c.y, color, name, team, now));
+            totalPts += ptsEach;
+          }
+          addScore(mode, name, team, totalPts);
+          schedulePersist();
+          emitBatch({
+            mode,
+            pixels: painted,
+            fx: { type: "wave", x, y, color, dir, points: totalPts },
+          });
+          socket.emit("quota", spend.quota);
+          ack?.({ ok: true, quota: spend.quota, count: painted.length, points: totalPts });
+          return;
+        }
+
+        // ── Normal paint (1 star) ──
+        const spend = trySpendStars(clientIp, 1, now);
+        if (!spend.ok) {
+          const wait = spend.quota.nextStarIn;
+          ack?.({
+            error: wait
+              ? `No stars left. Next star in ${wait}s.`
+              : "No stars left.",
+            quota: spend.quota,
+          });
+          socket.emit("quota", spend.quota);
+          return;
+        }
+
+        const pts = pixelScore(clientIp, now);
+        const pixel = paintCell(mode, x, y, color, name, team, now);
+        addScore(mode, name, team, pts);
+        schedulePersist();
+        emitBatch({
+          mode,
+          pixels: [pixel],
+          fx: { type: "paint", x, y, color, points: pts },
         });
         socket.emit("quota", spend.quota);
-        return;
+        ack?.({ ok: true, pixel, quota: spend.quota, points: pts });
       }
-
-      const pixel: Pixel = {
-        x,
-        y,
-        color: payload.color,
-        name,
-        placedAt: now,
-      };
-
-      pixels.set(`${x},${y}`, pixel);
-      scheduleSavePixels(pixels);
-
-      io.emit("pixel", { pixel });
-      socket.emit("quota", spend.quota);
-      ack?.({ ok: true, pixel, quota: spend.quota });
-    });
+    );
 
     socket.on("disconnect", () => {
       broadcastOnline();
@@ -366,9 +673,9 @@ app.prepare().then(() => {
   });
 
   httpServer.listen(port, hostname, () => {
-    console.log(`> DSCE Place listening on ${hostname}:${port}`);
+    console.log(`> DSCE Place on ${hostname}:${port}`);
     console.log(
-      `> Grid ${GRID_WIDTH}×${GRID_HEIGHT} · ${MAX_STARS} stars · regen ${REGEN_SECONDS}s · IP · ${pixels.size} pixels`
+      `> free=${worlds.free.size} team=${worlds.team.size} · stars ${MAX_STARS} · no GPS`
     );
   });
 });

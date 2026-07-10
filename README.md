@@ -9,8 +9,11 @@ Collaborative real-time pixel canvas over **Dayananda Sagar College of Engineeri
 - **Real-time sync** via Socket.IO (all users see pixels instantly)
 - **Name only** — no account; name is saved in the browser
 - **★ Star bank** — 30 stars per IP; paint costs 1; +1 star every 30s (regen starts the moment you paint)
-- **GPS “you are here”** — maps phone location onto the campus grid (approximate; tune bounds)
-- **Persistent canvas** — pixels in `data/pixels.json`, quotas in `data/quotas.json`
+- **Free + Team modes** — FFA or branch war (ISE, CSE, AIML, …) with live leaderboards
+- **Power-ups** — Paint Bomb, Multiplier (20s 2×), Ink Wave; **Eraser** (1★)
+- **Paint FX** — splash + floating +1
+- **No GPS** — fully online
+- **Persistent** — `data/pixels-free.json`, `pixels-team.json`, quotas, scores
 
 ## Quick start
 
