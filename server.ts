@@ -393,7 +393,7 @@ function upsertIdentity(
 
   if (opts.mode === "team") {
     if (id.teamLocked && id.team) {
-      // Team cannot change once locked
+      // Already chose once — ignore any other team, keep locked team
       if (opts.team && opts.team !== id.team) {
         return {
           ok: false,
@@ -403,11 +403,17 @@ function upsertIdentity(
       }
       id.mode = "team";
     } else if (isValidTeam(opts.team)) {
+      // First explicit choice — lock forever
       id.team = opts.team;
       id.teamLocked = true;
       id.mode = "team";
-    } else if (!id.team) {
-      return { ok: false, error: "Pick a valid team/branch.", identity: id };
+    } else {
+      // No team provided and not locked yet — client must show picker
+      return {
+        ok: false,
+        error: "Pick a team first.",
+        identity: id,
+      };
     }
   } else if (opts.mode === "free") {
     id.mode = "free";

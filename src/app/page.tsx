@@ -107,15 +107,20 @@ export default function Home() {
     const savedName = localStorage.getItem(NAME_KEY);
     const savedMode = localStorage.getItem(MODE_KEY) as GameMode | null;
     const savedTeam = localStorage.getItem(TEAM_KEY) as TeamId | null;
+    // Only true after an explicit confirmed team pick
     const locked = localStorage.getItem(TEAM_LOCKED_KEY) === "1";
     if (savedName) {
       setName(savedName);
       if (savedMode === "free" || savedMode === "team") setMode(savedMode);
-      if (savedTeam && TEAMS.includes(savedTeam)) {
+      // Team only restored if it was locked (chosen once)
+      if (locked && savedTeam && TEAMS.includes(savedTeam)) {
         setTeam(savedTeam);
+        setTeamLocked(true);
         setSelectedColor(colorForTeam(savedTeam));
+      } else {
+        setTeam(null);
+        setTeamLocked(false);
       }
-      setTeamLocked(locked || Boolean(savedTeam && savedMode === "team"));
     }
     setReady(true);
   }, []);
@@ -162,16 +167,28 @@ export default function Home() {
     (id: NonNullable<ServerHello["identity"]>) => {
       setName(id.name);
       setMode(id.mode);
-      setTeam(id.team);
-      setTeamLocked(id.teamLocked || Boolean(id.team));
       localStorage.setItem(NAME_KEY, id.name);
       localStorage.setItem(MODE_KEY, id.mode);
-      if (id.team) {
+      // Team only if server has locked it (chosen once)
+      if (id.teamLocked && id.team) {
+        setTeam(id.team);
+        setTeamLocked(true);
         localStorage.setItem(TEAM_KEY, id.team);
-        setSelectedColor(colorForTeam(id.team));
-      }
-      if (id.teamLocked || id.team) {
         localStorage.setItem(TEAM_LOCKED_KEY, "1");
+        setSelectedColor(colorForTeam(id.team));
+      } else if (id.mode === "team" && !id.teamLocked) {
+        // Needs to pick — don't invent CSE
+        setTeam(null);
+        setTeamLocked(false);
+        localStorage.removeItem(TEAM_LOCKED_KEY);
+      } else if (id.mode === "free") {
+        // Keep locked team on file for later, but don't force mode team
+        if (id.teamLocked && id.team) {
+          setTeam(id.team);
+          setTeamLocked(true);
+          localStorage.setItem(TEAM_KEY, id.team);
+          localStorage.setItem(TEAM_LOCKED_KEY, "1");
+        }
       }
     },
     []
@@ -256,20 +273,24 @@ export default function Home() {
   const handleJoin = (n: string, m: GameMode, t: TeamId | null) => {
     localStorage.setItem(NAME_KEY, n);
     localStorage.setItem(MODE_KEY, m);
-    if (t) {
-      localStorage.setItem(TEAM_KEY, t);
-      localStorage.setItem(TEAM_LOCKED_KEY, "1");
-      setTeamLocked(true);
-    } else {
-      localStorage.removeItem(TEAM_KEY);
-    }
     setName(n);
     setMode(m);
-    setTeam(t);
-    if (m === "team" && t) setSelectedColor(colorForTeam(t));
+
+    if (m === "team" && t) {
+      // Explicit first pick from name gate → lock
+      localStorage.setItem(TEAM_KEY, t);
+      localStorage.setItem(TEAM_LOCKED_KEY, "1");
+      setTeam(t);
+      setTeamLocked(true);
+      setSelectedColor(colorForTeam(t));
+    } else {
+      // Free mode — do not invent a team
+      setTeam(teamLocked ? team : null);
+    }
+
     socket?.emit(
       "joinMode",
-      { mode: m, team: t, name: n, deviceId },
+      { mode: m, team: m === "team" ? t : null, name: n, deviceId },
       (res: { error?: string; identity?: ServerHello["identity"] }) => {
         if (res?.error) showToast(res.error);
         if (res?.identity) applyIdentity(res.identity);
@@ -277,14 +298,17 @@ export default function Home() {
     );
   };
 
+  /** Confirm team once from the selection menu — then permanently locked */
   const enterTeamMode = (t: TeamId) => {
     if (!name) return;
-    if (teamLocked && team && team !== t) {
-      showToast("Team can't be changed");
+    if (teamLocked && team) {
+      // Already locked — only allow re-entry with same team
       setTeamPickerOpen(false);
+      socket?.emit("joinMode", { mode: "team", team, name, deviceId });
+      showToast(`Team Mode · ${team}`);
       return;
     }
-    setTeamPickerOpen(false);
+
     socket?.emit(
       "joinMode",
       { mode: "team", team: t, name, deviceId },
@@ -298,44 +322,45 @@ export default function Home() {
           if (res.identity) applyIdentity(res.identity);
           return;
         }
+        setTeam(t);
+        setMode("team");
+        setTeamLocked(true);
+        setSelectedColor(colorForTeam(t));
+        localStorage.setItem(MODE_KEY, "team");
+        localStorage.setItem(TEAM_KEY, t);
+        localStorage.setItem(TEAM_LOCKED_KEY, "1");
         if (res?.identity) applyIdentity(res.identity);
-        else {
-          setTeam(t);
-          setMode("team");
-          setTeamLocked(true);
-          setSelectedColor(colorForTeam(t));
-          localStorage.setItem(MODE_KEY, "team");
-          localStorage.setItem(TEAM_KEY, t);
-          localStorage.setItem(TEAM_LOCKED_KEY, "1");
-        }
-        showToast(`Team Mode · ${t}`);
+        setTeamPickerOpen(false);
+        showToast(`Team Mode · ${t} (locked)`);
       }
     );
   };
 
   const switchMode = (m: GameMode) => {
     if (!name) return;
+
     if (m === "team") {
+      // Already chose once → go straight into team world
       if (teamLocked && team) {
-        // Already locked — re-enter team world without re-picking
         socket?.emit(
           "joinMode",
           { mode: "team", team, name, deviceId },
           (res: { error?: string; identity?: ServerHello["identity"] }) => {
             if (res?.error) showToast(res.error);
             if (res?.identity) applyIdentity(res.identity);
-            else {
-              setMode("team");
-              showToast(`Team Mode · ${team}`);
-            }
+            else setMode("team");
+            showToast(`Team Mode · ${team}`);
           }
         );
         return;
       }
-      setPendingTeam(team && TEAMS.includes(team) ? team : "CSE");
+      // First time → always open picker (never auto-assign CSE)
+      setPendingTeam("CSE"); // visual default only, not submitted until Join
       setTeamPickerOpen(true);
       return;
     }
+
+    // Free mode
     socket?.emit(
       "joinMode",
       { mode: "free", team: null, name, deviceId },
@@ -840,22 +865,17 @@ export default function Home() {
             </div>
           </div>
           {mode === "team" && team ? (
-            <div className="flex flex-col items-center gap-1 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-              <div className="flex items-center justify-center gap-2">
-                <span
-                  className="h-6 w-6 rounded-md border border-white/30 shadow"
-                  style={{ backgroundColor: colorForTeam(team) }}
-                />
-                <div className="text-left">
-                  <div className="text-[11px] font-bold text-white">{team}</div>
-                  <div className="text-[9px] text-white/40">
-                    Whole team paints this color
-                  </div>
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+              <span
+                className="h-6 w-6 rounded-md border border-white/30 shadow"
+                style={{ backgroundColor: colorForTeam(team) }}
+              />
+              <div className="text-left">
+                <div className="text-[11px] font-bold text-white">{team}</div>
+                <div className="text-[9px] text-white/40">
+                  Whole team paints this color
                 </div>
               </div>
-              <p className="text-[10px] font-bold uppercase tracking-wide text-red-500">
-                Can&apos;t be changed
-              </p>
             </div>
           ) : (
             hudOpen && (
