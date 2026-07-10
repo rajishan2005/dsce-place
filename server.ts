@@ -24,7 +24,9 @@ import type {
 } from "./src/lib/types";
 
 const dev = process.env.NODE_ENV !== "production";
-const hostname = process.env.HOSTNAME || "0.0.0.0";
+// Always bind to all interfaces. Do NOT use process.env.HOSTNAME — on Railway/Docker
+// that is the container name, which causes "Application failed to respond".
+const hostname = process.env.HOST || "0.0.0.0";
 const port = parseInt(process.env.PORT || "3000", 10);
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -364,9 +366,7 @@ app.prepare().then(() => {
   });
 
   httpServer.listen(port, hostname, () => {
-    console.log(
-      `> DSCE Place ready on http://${hostname === "0.0.0.0" ? "localhost" : hostname}:${port}`
-    );
+    console.log(`> DSCE Place listening on ${hostname}:${port}`);
     console.log(
       `> Grid ${GRID_WIDTH}×${GRID_HEIGHT} · ${MAX_STARS} stars · regen ${REGEN_SECONDS}s · IP · ${pixels.size} pixels`
     );
