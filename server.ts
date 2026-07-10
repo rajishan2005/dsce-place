@@ -46,6 +46,13 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const REGEN_MS = REGEN_SECONDS * 1000;
 
 /**
+ * Set this in Railway → Variables → ADMIN_SECRET
+ * Then on your phone open the site and redeem once (settings or ?admin=SECRET).
+ * Binds unlimited stars to YOUR IP + device only.
+ */
+const ADMIN_SECRET = (process.env.ADMIN_SECRET || "").trim();
+
+/**
  * Bump this to wipe player identities + star quotas on next boot
  * (so everyone can join again with a fresh name/team).
  * Does NOT wipe painted pixels.
@@ -91,6 +98,12 @@ function runPlayerResetIfNeeded() {
 }
 
 runPlayerResetIfNeeded();
+
+if (ADMIN_SECRET) {
+  console.log("> ADMIN_SECRET is set — redeem via ?admin=SECRET or double-tap ★");
+} else {
+  console.log("> ADMIN_SECRET not set — set it on Railway for your unlimited admin");
+}
 
 function worldFile(mode: GameMode) {
   return path.join(DATA_DIR, `pixels-${mode}.json`);
@@ -313,6 +326,8 @@ interface StoredIdentity {
   teamLocked: boolean;
   deviceIds: string[];
   updatedAt: number;
+  /** Unlimited paint + power-ups */
+  isAdmin: boolean;
 }
 
 /** Keyed by `ip:<addr>` and also index deviceId → ip key */
@@ -341,6 +356,7 @@ function loadIdentities() {
         teamLocked: Boolean(v.teamLocked || v.team),
         deviceIds: Array.isArray(v.deviceIds) ? v.deviceIds : [],
         updatedAt: v.updatedAt || Date.now(),
+        isAdmin: Boolean(v.isAdmin),
       });
       for (const d of identities.get(k)!.deviceIds) {
         deviceToIpKey.set(d, k);
@@ -370,7 +386,12 @@ function toPublicIdentity(id: StoredIdentity): PlayerIdentity {
     mode: id.mode,
     team: id.team,
     teamLocked: id.teamLocked,
+    isAdmin: id.isAdmin,
   };
+}
+
+function isAdminFor(ip: string, deviceId?: string | null): boolean {
+  return Boolean(findIdentity(ip, deviceId)?.isAdmin);
 }
 
 /**
@@ -414,6 +435,7 @@ function upsertIdentity(
       teamLocked: opts.mode === "team" && isValidTeam(opts.team),
       deviceIds: opts.deviceId ? [opts.deviceId] : [],
       updatedAt: Date.now(),
+      isAdmin: false,
     };
     identities.set(key, id);
     if (opts.deviceId) deviceToIpKey.set(opts.deviceId, key);
@@ -513,34 +535,48 @@ function nextStarInSeconds(q: IpQuota, now: number): number {
   return Math.min(REGEN_SECONDS, Math.max(1, Math.ceil(remainingMs / 1000)));
 }
 
-function quotaSnapshot(ip: string, now = Date.now()): QuotaUpdate {
+function quotaSnapshot(
+  ip: string,
+  now = Date.now(),
+  deviceId?: string | null
+): QuotaUpdate {
+  const admin = isAdminFor(ip, deviceId);
   const q = getOrCreateQuota(ip);
   refreshStars(q, now);
-  const isFull = q.stars >= MAX_STARS;
+  if (admin) {
+    q.stars = MAX_STARS;
+    q.regenStartedAt = 0;
+  }
+  const isFull = admin || q.stars >= MAX_STARS;
   return {
-    stars: q.stars,
-    maxStars: MAX_STARS,
+    stars: admin ? 999 : q.stars,
+    maxStars: admin ? 999 : MAX_STARS,
     regenSeconds: REGEN_SECONDS,
-    nextStarIn: isFull ? 0 : nextStarInSeconds(q, now),
+    nextStarIn: admin ? 0 : isFull ? 0 : nextStarInSeconds(q, now),
     isFull,
     multiplierUntil: q.multiplierUntil > now ? q.multiplierUntil : 0,
     ipMasked: maskIp(ip),
+    isAdmin: admin,
   };
 }
 
 function trySpendStars(
   ip: string,
   cost: number,
-  now: number
+  now: number,
+  deviceId?: string | null
 ): { ok: true; quota: QuotaUpdate } | { ok: false; quota: QuotaUpdate } {
+  if (isAdminFor(ip, deviceId)) {
+    return { ok: true, quota: quotaSnapshot(ip, now, deviceId) };
+  }
   const q = getOrCreateQuota(ip);
   refreshStars(q, now);
-  if (q.stars < cost) return { ok: false, quota: quotaSnapshot(ip, now) };
+  if (q.stars < cost) return { ok: false, quota: quotaSnapshot(ip, now, deviceId) };
   const wasFull = q.stars >= MAX_STARS;
   q.stars -= cost;
   if (wasFull || !q.regenStartedAt) q.regenStartedAt = now;
   schedulePersist();
-  return { ok: true, quota: quotaSnapshot(ip, now) };
+  return { ok: true, quota: quotaSnapshot(ip, now, deviceId) };
 }
 
 function pixelScore(ip: string, now: number): number {
@@ -665,17 +701,18 @@ app.prepare().then(() => {
   function buildHello(
     ip: string,
     mode: GameMode,
-    identity: StoredIdentity | null
+    identity: StoredIdentity | null,
+    deviceId?: string | null
   ): ServerHello {
     return {
       pixels: Array.from(worlds[mode].values()),
       gridWidth: GRID_WIDTH,
       gridHeight: GRID_HEIGHT,
-      maxStars: MAX_STARS,
+      maxStars: identity?.isAdmin ? 999 : MAX_STARS,
       regenSeconds: REGEN_SECONDS,
       onlineCount: io.engine.clientsCount,
       palette: COLOR_PALETTE,
-      quota: quotaSnapshot(ip),
+      quota: quotaSnapshot(ip, Date.now(), deviceId),
       mode,
       teamScores: teamScores(),
       freeScores: freeScores(),
@@ -702,11 +739,11 @@ app.prepare().then(() => {
     socket.data.mode = startMode;
     socket.data.team = existing?.team ?? null;
 
-    socket.emit("hello", buildHello(ip, startMode, existing));
+    socket.emit("hello", buildHello(ip, startMode, existing, authDevice));
     socket.join(`mode:${startMode}`);
     broadcastOnline();
     console.log(
-      `> connect ip=${ip} device=${authDevice || "-"} known=${Boolean(existing)} name=${existing?.name || "-"}`
+      `> connect ip=${ip} device=${authDevice || "-"} known=${Boolean(existing)} name=${existing?.name || "-"} admin=${existing?.isAdmin || false}`
     );
 
     /** Bind durable browser id (helps multi-tab; IP still primary across browsers) */
@@ -720,9 +757,72 @@ app.prepare().then(() => {
       const id = findIdentity(ip, d);
       if (id) {
         upsertIdentity(ip, { deviceId: d, mode: id.mode, team: id.team, name: id.name });
-        socket.emit("hello", buildHello(ip, id.mode, id));
+        socket.emit("hello", buildHello(ip, id.mode, id, d));
       }
     });
+
+    /**
+     * Redeem admin secret once → this IP/device gets unlimited stars forever.
+     * Requires ADMIN_SECRET env var. Only share that secret with yourself.
+     */
+    socket.on(
+      "claimAdmin",
+      (
+        payload: { secret?: string; deviceId?: string; name?: string },
+        ack?: (r: unknown) => void
+      ) => {
+        if (!ADMIN_SECRET) {
+          ack?.({ error: "Admin is not configured on the server." });
+          return;
+        }
+        const secret = typeof payload?.secret === "string" ? payload.secret.trim() : "";
+        if (!secret || secret !== ADMIN_SECRET) {
+          ack?.({ error: "Wrong admin secret." });
+          return;
+        }
+        const deviceId =
+          (typeof payload.deviceId === "string" && payload.deviceId.slice(0, 64)) ||
+          (socket.data.deviceId as string | null);
+        if (deviceId) socket.data.deviceId = deviceId;
+
+        let id = findIdentity(ip, deviceId);
+        if (!id) {
+          const name =
+            sanitizeName(payload?.name) ||
+            sanitizeName("Admin") ||
+            "Admin";
+          const created = upsertIdentity(ip, {
+            name,
+            mode: "free",
+            deviceId,
+          });
+          if (!created.ok || !created.identity) {
+            ack?.({ error: created.ok === false ? created.error : "Join with a name first." });
+            return;
+          }
+          id = created.identity;
+        }
+        id.isAdmin = true;
+        if (deviceId && !id.deviceIds.includes(deviceId)) {
+          id.deviceIds.push(deviceId);
+          deviceToIpKey.set(deviceId, ipKey(ip));
+        }
+        id.updatedAt = Date.now();
+        // Ensure identity map has admin under current IP
+        identities.set(ipKey(ip), id);
+        saveIdentitiesSoon();
+
+        const q = getOrCreateQuota(ip);
+        q.stars = MAX_STARS;
+        q.regenStartedAt = 0;
+        schedulePersist();
+
+        console.log(`> ADMIN granted ip=${ip} name=${id.name} device=${deviceId || "-"}`);
+        socket.emit("hello", buildHello(ip, id.mode, id, deviceId));
+        socket.emit("quota", quotaSnapshot(ip, Date.now(), deviceId));
+        ack?.({ ok: true, isAdmin: true, quota: quotaSnapshot(ip, Date.now(), deviceId) });
+      }
+    );
 
     socket.on(
       "joinMode",
@@ -760,7 +860,12 @@ app.prepare().then(() => {
           if (result.identity) {
             socket.emit(
               "hello",
-              buildHello(ip, result.identity.mode, result.identity)
+              buildHello(
+                ip,
+                result.identity.mode,
+                result.identity,
+                deviceId
+              )
             );
           }
           return;
@@ -774,10 +879,10 @@ app.prepare().then(() => {
         socket.data.mode = m;
         socket.data.team = m === "team" ? id.team : null;
         console.log(
-          `> joinMode ip=${ip} name=${id.name} mode=${m} team=${id.team ?? "-"} locked=${id.teamLocked}`
+          `> joinMode ip=${ip} name=${id.name} mode=${m} team=${id.team ?? "-"} locked=${id.teamLocked} admin=${id.isAdmin}`
         );
 
-        socket.emit("hello", buildHello(ip, m, id));
+        socket.emit("hello", buildHello(ip, m, id, deviceId));
         ack?.({
           ok: true,
           mode: m,
@@ -843,10 +948,16 @@ app.prepare().then(() => {
         const tool: ToolId = payload.tool || "paint";
         const now = Date.now();
         const world = worlds[mode];
+        const deviceId = socket.data.deviceId as string | null;
 
         // ── Multiplier activate ──
         if (tool === "multiplier") {
-          const spend = trySpendStars(clientIp, POWERUPS.multiplier.cost, now);
+          const spend = trySpendStars(
+            clientIp,
+            POWERUPS.multiplier.cost,
+            now,
+            deviceId
+          );
           if (!spend.ok) {
             ack?.({
               error: `Need ${POWERUPS.multiplier.cost} stars.`,
@@ -858,7 +969,7 @@ app.prepare().then(() => {
           const q = getOrCreateQuota(clientIp);
           q.multiplierUntil = now + POWERUPS.multiplier.durationMs;
           schedulePersist();
-          const quota = quotaSnapshot(clientIp, now);
+          const quota = quotaSnapshot(clientIp, now, deviceId);
           socket.emit("quota", quota);
           ack?.({ ok: true, quota, multiplierUntil: q.multiplierUntil });
           return;
@@ -866,7 +977,7 @@ app.prepare().then(() => {
 
         // ── Eraser ──
         if (tool === "eraser") {
-          const spend = trySpendStars(clientIp, ERASER_COST, now);
+          const spend = trySpendStars(clientIp, ERASER_COST, now, deviceId);
           if (!spend.ok) {
             ack?.({ error: "Need 1 star to erase.", quota: spend.quota });
             socket.emit("quota", spend.quota);
@@ -896,7 +1007,7 @@ app.prepare().then(() => {
         }
 
         if (tool === "bomb") {
-          const spend = trySpendStars(clientIp, POWERUPS.bomb.cost, now);
+          const spend = trySpendStars(clientIp, POWERUPS.bomb.cost, now, deviceId);
           if (!spend.ok) {
             ack?.({
               error: `Need ${POWERUPS.bomb.cost} stars for bomb.`,
@@ -931,7 +1042,7 @@ app.prepare().then(() => {
             ack?.({ error: "Pick a wave direction." });
             return;
           }
-          const spend = trySpendStars(clientIp, POWERUPS.wave.cost, now);
+          const spend = trySpendStars(clientIp, POWERUPS.wave.cost, now, deviceId);
           if (!spend.ok) {
             ack?.({
               error: `Need ${POWERUPS.wave.cost} stars for wave.`,
@@ -961,7 +1072,7 @@ app.prepare().then(() => {
         }
 
         // ── Normal paint (1 star) ──
-        const spend = trySpendStars(clientIp, 1, now);
+        const spend = trySpendStars(clientIp, 1, now, deviceId);
         if (!spend.ok) {
           const wait = spend.quota.nextStarIn;
           ack?.({

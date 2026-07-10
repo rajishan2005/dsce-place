@@ -35,6 +35,8 @@ export interface QuotaUpdate {
   multiplierUntil: number;
   /** Masked client IP — stars are locked to this network */
   ipMasked?: string;
+  /** Unlimited paint / power-ups for this identity */
+  isAdmin?: boolean;
 }
 
 export interface TeamScoreRow {
@@ -57,6 +59,7 @@ export interface PlayerIdentity {
   team: TeamId | null;
   /** Once set in team mode, cannot change */
   teamLocked: boolean;
+  isAdmin?: boolean;
 }
 
 export interface ServerHello {

@@ -89,6 +89,7 @@ export default function Home() {
   const [teamPickerOpen, setTeamPickerOpen] = useState(false);
   const [pendingTeam, setPendingTeam] = useState<TeamId>("CSE");
   const [ipMasked, setIpMasked] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const canvasRef = useRef<PixelCanvasHandle>(null);
   const modeRef = useRef(mode);
@@ -139,6 +140,7 @@ export default function Home() {
     setRegenSeconds(quota.regenSeconds);
     setMultiplierUntil(quota.multiplierUntil || 0);
     if (quota.ipMasked) setIpMasked(quota.ipMasked);
+    if (typeof quota.isAdmin === "boolean") setIsAdmin(quota.isAdmin);
   }, []);
 
   useEffect(() => {
@@ -231,6 +233,33 @@ export default function Home() {
     s.on("connect", () => {
       setStatus("live");
       s.emit("helloDevice", { deviceId });
+      // Auto-redeem admin from URL once: ?admin=YOUR_SECRET
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const secret = params.get("admin");
+        if (secret) {
+          s.emit(
+            "claimAdmin",
+            { secret, deviceId, name: localStorage.getItem(NAME_KEY) || undefined },
+            (res: { ok?: boolean; error?: string; quota?: QuotaUpdate }) => {
+              if (res?.quota) applyQuota(res.quota);
+              if (res?.ok) {
+                setIsAdmin(true);
+                setToast("Admin unlocked · unlimited ★");
+                setTimeout(() => setToast(null), 2500);
+                const u = new URL(window.location.href);
+                u.searchParams.delete("admin");
+                window.history.replaceState({}, "", u.pathname + u.search);
+              } else if (res?.error) {
+                setToast(res.error);
+                setTimeout(() => setToast(null), 2500);
+              }
+            }
+          );
+        }
+      } catch {
+        /* ignore */
+      }
     });
     s.on("disconnect", () => setStatus("offline"));
 
@@ -387,7 +416,7 @@ export default function Home() {
   const handlePlace = useCallback(
     (x: number, y: number) => {
       if (!socket || !name) return;
-      if (stars < toolCost) {
+      if (!isAdmin && stars < toolCost) {
         showToast(
           nextStarIn > 0
             ? `Need ${toolCost}★ — next star in ${nextStarIn}s`
@@ -397,20 +426,20 @@ export default function Home() {
       }
 
       // Optimistic star spend for paint/eraser only (powerups server-authoritative)
-      if (tool === "paint" || tool === "eraser") {
+      if (!isAdmin && (tool === "paint" || tool === "eraser")) {
         setStars((prev) => Math.max(0, prev - 1));
         setNextStarIn((prev) => (prev > 0 ? prev : regenSeconds));
-        if (tool === "paint") {
-          canvasRef.current?.spawnFx({
-            type: "paint",
-            x,
-            y,
-            color: activeColor,
-            points: multiplierUntil > Date.now() ? 2 : 1,
-          });
-        } else {
-          canvasRef.current?.spawnFx({ type: "erase", x, y, points: 0 });
-        }
+      }
+      if (tool === "paint") {
+        canvasRef.current?.spawnFx({
+          type: "paint",
+          x,
+          y,
+          color: activeColor,
+          points: multiplierUntil > Date.now() ? 2 : 1,
+        });
+      } else if (tool === "eraser") {
+        canvasRef.current?.spawnFx({ type: "erase", x, y, points: 0 });
       }
 
       socket.emit(
@@ -449,6 +478,7 @@ export default function Home() {
       waveDir,
       regenSeconds,
       multiplierUntil,
+      isAdmin,
       showToast,
       applyQuota,
     ]
@@ -456,7 +486,7 @@ export default function Home() {
 
   const activateMultiplier = () => {
     if (!socket || !name) return;
-    if (stars < POWERUPS.multiplier.cost) {
+    if (!isAdmin && stars < POWERUPS.multiplier.cost) {
       showToast(`Need ${POWERUPS.multiplier.cost}★ for multiplier`);
       return;
     }
@@ -482,8 +512,26 @@ export default function Home() {
   const canPlace =
     Boolean(name) &&
     status === "live" &&
-    stars >= toolCost &&
+    (isAdmin || stars >= toolCost) &&
     tool !== "multiplier";
+
+  const redeemAdminPrompt = () => {
+    if (!socket) return;
+    const secret = window.prompt("Admin secret (only for you):");
+    if (!secret) return;
+    socket.emit(
+      "claimAdmin",
+      { secret: secret.trim(), deviceId, name: name || undefined },
+      (res: { ok?: boolean; error?: string; quota?: QuotaUpdate }) => {
+        if (res?.error) showToast(res.error);
+        if (res?.quota) applyQuota(res.quota);
+        if (res?.ok) {
+          setIsAdmin(true);
+          showToast("Admin unlocked · unlimited ★");
+        }
+      }
+    );
+  };
 
   const pixelCount = pixels.size;
   const isFull = stars >= maxStars;
@@ -674,17 +722,28 @@ export default function Home() {
         </div>
 
         <div className="pointer-events-auto flex flex-col items-end gap-1.5">
-          <div className="hud-panel flex items-center gap-2 px-2.5 py-1.5">
+          <button
+            type="button"
+            onDoubleClick={redeemAdminPrompt}
+            className="hud-panel flex items-center gap-2 px-2.5 py-1.5 text-left"
+            title="Double-tap stars to enter admin secret (you only)"
+          >
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] text-amber-300">★</span>
               <span className="font-mono text-[12px] font-bold tabular-nums text-amber-100">
-                {stars}
-                <span className="text-amber-200/40">/{maxStars}</span>
+                {isAdmin ? "∞" : stars}
+                {!isAdmin && (
+                  <span className="text-amber-200/40">/{maxStars}</span>
+                )}
               </span>
             </div>
             <div className="h-3 w-px bg-white/10" />
             <div className="flex min-w-[52px] flex-col items-end">
-              {isFull ? (
+              {isAdmin ? (
+                <span className="text-[9px] font-bold uppercase tracking-wider text-fuchsia-300">
+                  Admin
+                </span>
+              ) : isFull ? (
                 <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400/90">
                   Maxed
                 </span>
@@ -703,7 +762,7 @@ export default function Home() {
                 </>
               )}
             </div>
-          </div>
+          </button>
 
           <div className="hud-panel flex flex-wrap items-center justify-end gap-2 px-2 py-1 text-[9px] text-slate-300">
             <span className="tabular-nums">
