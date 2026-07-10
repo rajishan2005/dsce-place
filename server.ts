@@ -674,8 +674,16 @@ app.prepare().then(() => {
   });
 
   const io = new SocketIOServer(httpServer, {
-    cors: { origin: "*" },
-    transports: ["websocket", "polling"],
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"],
+    },
+    // Allow polling first for restricted networks (laptops / campus Wi‑Fi)
+    transports: ["polling", "websocket"],
+    allowUpgrades: true,
+    pingTimeout: 30000,
+    pingInterval: 25000,
+    maxHttpBufferSize: 2e6,
   });
 
   function broadcastOnline() {

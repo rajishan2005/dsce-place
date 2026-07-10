@@ -222,16 +222,25 @@ export default function Home() {
 
   useEffect(() => {
     if (!deviceId) return;
+    // polling first = more reliable on campus/office Wi‑Fi & Windows laptops
+    // where raw WebSockets are often blocked; upgrades to websocket when possible
     const s = io({
       path: "/socket.io",
-      transports: ["websocket", "polling"],
+      transports: ["polling", "websocket"],
+      upgrade: true,
+      rememberUpgrade: true,
       autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: 20,
+      reconnectionDelay: 800,
+      timeout: 20000,
       auth: { deviceId },
     });
     setSocket(s);
 
     s.on("connect", () => {
       setStatus("live");
+      setToast(null);
       s.emit("helloDevice", { deviceId });
       // Auto-redeem admin from URL once: ?admin=YOUR_SECRET
       try {
@@ -261,7 +270,22 @@ export default function Home() {
         /* ignore */
       }
     });
-    s.on("disconnect", () => setStatus("offline"));
+    s.on("disconnect", (reason) => {
+      setStatus("offline");
+      if (reason !== "io client disconnect") {
+        setToast("Connection lost — reconnecting…");
+      }
+    });
+    s.on("connect_error", () => {
+      setStatus("offline");
+      setToast("Can't reach server — check Wi‑Fi / try another network");
+    });
+    s.io.on("reconnect", () => {
+      setStatus("live");
+      setToast("Back online");
+      setTimeout(() => setToast(null), 1500);
+      s.emit("helloDevice", { deviceId });
+    });
 
     s.on("hello", (hello: ServerHello) => applyHello(hello));
 
