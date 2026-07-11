@@ -46,12 +46,15 @@ export function colorForTeam(team: TeamId): string {
   return TEAM_COLORS[team];
 }
 
+/** Shared cooldown after using bomb / wave / 2× once (1 hour) */
+export const POWERUP_COOLDOWN_MS = 60 * 60 * 1000;
+
 /** Power-up costs (stars) and effects */
 export const POWERUPS = {
   bomb: {
     id: "bomb" as const,
     label: "Paint Bomb",
-    cost: 5,
+    cost: 10,
     /** half-size: 5×5 → radius 2 */
     radius: 2,
   },

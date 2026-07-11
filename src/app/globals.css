@@ -40,3 +40,58 @@ body {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
+
+/* Vertical map-opacity slider (left rail) */
+.opacity-slider-v {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 18px;
+  height: 88px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.opacity-slider-v::-webkit-slider-runnable-track {
+  width: 4px;
+  height: 100%;
+  margin: 0 auto;
+  border-radius: 999px;
+  background: linear-gradient(
+    to top,
+    rgba(251, 191, 36, 0.25),
+    rgba(255, 255, 255, 0.35)
+  );
+}
+
+.opacity-slider-v::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-left: -5px;
+  border-radius: 999px;
+  background: #fbbf24;
+  border: 2px solid rgba(0, 0, 0, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+.opacity-slider-v::-moz-range-track {
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to top,
+    rgba(251, 191, 36, 0.25),
+    rgba(255, 255, 255, 0.35)
+  );
+}
+
+.opacity-slider-v::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fbbf24;
+  border: 2px solid rgba(0, 0, 0, 0.45);
+}

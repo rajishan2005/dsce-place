@@ -25,6 +25,13 @@ export interface PlacePixelPayload {
   dir?: WaveDir;
 }
 
+/** When each power-up can be used again (ms epoch; 0 = ready now) */
+export type PowerupReadyAt = {
+  bomb: number;
+  wave: number;
+  multiplier: number;
+};
+
 export interface QuotaUpdate {
   stars: number;
   maxStars: number;
@@ -37,6 +44,8 @@ export interface QuotaUpdate {
   ipMasked?: string;
   /** Unlimited paint / power-ups for this identity */
   isAdmin?: boolean;
+  /** Server timestamps when bomb/wave/2× are ready again */
+  powerupsReadyAt?: PowerupReadyAt;
 }
 
 export interface TeamScoreRow {

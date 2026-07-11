@@ -23,6 +23,7 @@ import type {
   FreeScoreRow,
   Pixel,
   PixelsBatchEvent,
+  PowerupReadyAt,
   QuotaUpdate,
   ScoresUpdate,
   ServerHello,
@@ -35,6 +36,23 @@ const MODE_KEY = "dsce-place-mode";
 const TEAM_KEY = "dsce-place-team";
 const DEVICE_KEY = "dsce-place-device-id";
 const TEAM_LOCKED_KEY = "dsce-place-team-locked";
+
+const EMPTY_POWERUP_CD: PowerupReadyAt = {
+  bomb: 0,
+  wave: 0,
+  multiplier: 0,
+};
+
+function formatPowerupCd(readyAt: number, now: number): string | null {
+  if (!readyAt || readyAt <= now) return null;
+  const sec = Math.max(1, Math.ceil((readyAt - now) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h${m > 0 ? `${m}m` : ""}`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+}
 
 function getOrCreateDeviceId(): string {
   try {
@@ -90,6 +108,14 @@ export default function Home() {
   const [pendingTeam, setPendingTeam] = useState<TeamId>("CSE");
   const [ipMasked, setIpMasked] = useState<string>("");
   const [isAdmin, setIsAdmin] = useState(false);
+  /** Collapsible leaderboard under left header */
+  const [boardOpen, setBoardOpen] = useState(false);
+  /** Stronger cell grid on map */
+  const [showGrid, setShowGrid] = useState(false);
+  /** Satellite map opacity 0–1 */
+  const [mapOpacity, setMapOpacity] = useState(1);
+  const [powerupsReadyAt, setPowerupsReadyAt] =
+    useState<PowerupReadyAt>(EMPTY_POWERUP_CD);
 
   const canvasRef = useRef<PixelCanvasHandle>(null);
   const modeRef = useRef(mode);
@@ -126,12 +152,17 @@ export default function Home() {
     setReady(true);
   }, []);
 
-  // Multiplier countdown tick
+  // Multiplier + power-up cooldown ticks
   useEffect(() => {
-    if (multiplierUntil <= Date.now()) return;
-    const t = setInterval(() => setNowTick(Date.now()), 250);
+    const anyCd =
+      multiplierUntil > Date.now() ||
+      powerupsReadyAt.bomb > Date.now() ||
+      powerupsReadyAt.wave > Date.now() ||
+      powerupsReadyAt.multiplier > Date.now();
+    if (!anyCd) return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [multiplierUntil]);
+  }, [multiplierUntil, powerupsReadyAt]);
 
   const applyQuota = useCallback((quota: QuotaUpdate) => {
     setStars(quota.stars);
@@ -141,6 +172,13 @@ export default function Home() {
     setMultiplierUntil(quota.multiplierUntil || 0);
     if (quota.ipMasked) setIpMasked(quota.ipMasked);
     if (typeof quota.isAdmin === "boolean") setIsAdmin(quota.isAdmin);
+    if (quota.powerupsReadyAt) {
+      setPowerupsReadyAt({
+        bomb: quota.powerupsReadyAt.bomb || 0,
+        wave: quota.powerupsReadyAt.wave || 0,
+        multiplier: quota.powerupsReadyAt.multiplier || 0,
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -440,6 +478,20 @@ export default function Home() {
   const handlePlace = useCallback(
     (x: number, y: number) => {
       if (!socket || !name) return;
+      if (!isAdmin) {
+        if (tool === "bomb" && powerupsReadyAt.bomb > Date.now()) {
+          showToast(
+            `Bomb on cooldown · ${formatPowerupCd(powerupsReadyAt.bomb, Date.now())}`
+          );
+          return;
+        }
+        if (tool === "wave" && powerupsReadyAt.wave > Date.now()) {
+          showToast(
+            `Wave on cooldown · ${formatPowerupCd(powerupsReadyAt.wave, Date.now())}`
+          );
+          return;
+        }
+      }
       if (!isAdmin && stars < toolCost) {
         showToast(
           nextStarIn > 0
@@ -503,13 +555,26 @@ export default function Home() {
       regenSeconds,
       multiplierUntil,
       isAdmin,
+      powerupsReadyAt,
       showToast,
       applyQuota,
     ]
   );
 
+  const bombCdLabel = formatPowerupCd(powerupsReadyAt.bomb, nowTick);
+  const waveCdLabel = formatPowerupCd(powerupsReadyAt.wave, nowTick);
+  const multCdLabel = formatPowerupCd(powerupsReadyAt.multiplier, nowTick);
+  const toolOnCooldown =
+    !isAdmin &&
+    ((tool === "bomb" && Boolean(bombCdLabel)) ||
+      (tool === "wave" && Boolean(waveCdLabel)));
+
   const activateMultiplier = () => {
     if (!socket || !name) return;
+    if (!isAdmin && multCdLabel) {
+      showToast(`2× on cooldown · ${multCdLabel}`);
+      return;
+    }
     if (!isAdmin && stars < POWERUPS.multiplier.cost) {
       showToast(`Need ${POWERUPS.multiplier.cost}★ for multiplier`);
       return;
@@ -528,7 +593,7 @@ export default function Home() {
       (res: { ok?: boolean; error?: string; quota?: QuotaUpdate }) => {
         if (res?.quota) applyQuota(res.quota);
         if (res?.error) showToast(res.error);
-        else showToast("2× score for 20s!");
+        else showToast("2× score for 20s · 1h cooldown");
       }
     );
   };
@@ -537,7 +602,8 @@ export default function Home() {
     Boolean(name) &&
     status === "live" &&
     (isAdmin || stars >= toolCost) &&
-    tool !== "multiplier";
+    tool !== "multiplier" &&
+    !toolOnCooldown;
 
   const redeemAdminPrompt = () => {
     if (!socket) return;
@@ -653,6 +719,8 @@ export default function Home() {
         canPlace={canPlace}
         tool={tool === "multiplier" ? "paint" : tool}
         waveDir={waveDir}
+        showGrid={showGrid}
+        mapOpacity={mapOpacity}
         onPlace={handlePlace}
         onHover={(p, x, y) => {
           setHoverPixel(p);
@@ -660,9 +728,47 @@ export default function Home() {
         }}
       />
 
+      {/* Left rail: grid + map opacity */}
+      <div className="pointer-events-none absolute left-2.5 top-1/2 z-20 -translate-y-1/2 sm:left-3">
+        <div className="pointer-events-auto hud-panel flex flex-col items-center gap-2 px-1.5 py-2">
+          <button
+            type="button"
+            onClick={() => setShowGrid((v) => !v)}
+            className={`flex h-8 w-8 items-center justify-center rounded-md text-[10px] font-bold transition ${
+              showGrid
+                ? "bg-amber-500/30 text-amber-100"
+                : "bg-white/5 text-white/45 hover:text-white/80"
+            }`}
+            title={showGrid ? "Hide grid" : "Show grid"}
+            aria-pressed={showGrid}
+          >
+            #
+          </button>
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-[7px] font-bold uppercase tracking-wider text-white/30">
+              Map
+            </span>
+            <input
+              type="range"
+              min={15}
+              max={100}
+              step={1}
+              value={Math.round(mapOpacity * 100)}
+              onChange={(e) => setMapOpacity(Number(e.target.value) / 100)}
+              className="opacity-slider-v"
+              title={`Map opacity ${Math.round(mapOpacity * 100)}%`}
+              aria-label="Map opacity"
+            />
+            <span className="font-mono text-[8px] tabular-nums text-white/35">
+              {Math.round(mapOpacity * 100)}
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* TOP HUD */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 p-2.5 sm:p-3">
-        <div className="pointer-events-auto flex flex-col gap-1.5">
+        <div className="pointer-events-auto flex max-w-[min(100%,280px)] flex-col gap-1.5">
           <div className="hud-panel flex items-center gap-2 px-2.5 py-1.5">
             <div className="flex h-6 w-6 items-center justify-center rounded bg-gradient-to-br from-amber-400 to-orange-600 text-[10px] font-black text-black shadow-inner">
               D
@@ -693,31 +799,98 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Mode switch */}
+          {/* Mode + collapsible board under DSCE head */}
           {name && (
-            <div className="hud-panel flex gap-1 p-1">
-              <button
-                type="button"
-                onClick={() => switchMode("free")}
-                className={`rounded px-2 py-1 text-[9px] font-bold ${
-                  mode === "free"
-                    ? "bg-amber-500/25 text-amber-100"
-                    : "text-white/40 hover:text-white/70"
-                }`}
-              >
-                Free
-              </button>
-              <button
-                type="button"
-                onClick={() => switchMode("team")}
-                className={`rounded px-2 py-1 text-[9px] font-bold ${
-                  mode === "team"
-                    ? "bg-sky-500/25 text-sky-100"
-                    : "text-white/40 hover:text-white/70"
-                }`}
-              >
-                Team
-              </button>
+            <div className="hud-panel flex flex-col gap-1 p-1">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => switchMode("free")}
+                  className={`rounded px-2 py-1 text-[9px] font-bold ${
+                    mode === "free"
+                      ? "bg-amber-500/25 text-amber-100"
+                      : "text-white/40 hover:text-white/70"
+                  }`}
+                >
+                  Free
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchMode("team")}
+                  className={`rounded px-2 py-1 text-[9px] font-bold ${
+                    mode === "team"
+                      ? "bg-sky-500/25 text-sky-100"
+                      : "text-white/40 hover:text-white/70"
+                  }`}
+                >
+                  Team
+                </button>
+                <div className="mx-0.5 h-3 w-px bg-white/10" />
+                <button
+                  type="button"
+                  onClick={() => setBoardOpen((v) => !v)}
+                  className={`ml-auto flex items-center gap-1 rounded px-2 py-1 text-[9px] font-bold ${
+                    boardOpen
+                      ? "bg-white/10 text-white"
+                      : "text-white/40 hover:text-white/70"
+                  }`}
+                  aria-expanded={boardOpen}
+                >
+                  Board
+                  <span className="text-[8px] opacity-70">
+                    {boardOpen ? "▴" : "▾"}
+                  </span>
+                </button>
+              </div>
+
+              {boardOpen && (
+                <div className="max-h-36 overflow-y-auto border-t border-white/10 px-1.5 py-1.5">
+                  <div className="mb-1 text-[8px] font-bold uppercase tracking-widest text-white/30">
+                    {mode === "team" ? "Team board" : "Top painters"}
+                  </div>
+                  {mode === "team" ? (
+                    <div className="space-y-0.5">
+                      {teamScores.slice(0, 8).map((r) => (
+                        <div
+                          key={r.team}
+                          className={`flex items-center justify-between gap-2 text-[9px] ${
+                            r.team === team ? "text-sky-200" : "text-white/60"
+                          }`}
+                        >
+                          <span className="font-semibold">{r.team}</span>
+                          <span className="font-mono text-white/40">
+                            {r.pixels} · {r.score} · {r.percent}%
+                          </span>
+                        </div>
+                      ))}
+                      {teamScores.length === 0 && (
+                        <p className="text-[9px] text-white/30">No scores yet</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {freeScores.slice(0, 8).map((r) => (
+                        <div
+                          key={r.name}
+                          className={`flex items-center justify-between gap-2 text-[9px] ${
+                            r.name === name ? "text-amber-200" : "text-white/60"
+                          }`}
+                        >
+                          <span className="max-w-[100px] truncate font-semibold">
+                            {r.name}
+                          </span>
+                          <span className="font-mono text-white/40">
+                            {r.pixels} · {r.score}
+                          </span>
+                        </div>
+                      ))}
+                      {freeScores.length === 0 && (
+                        <p className="text-[9px] text-white/30">Paint to rank</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -817,51 +990,6 @@ export default function Home() {
               IP lock · {ipMasked}
             </div>
           )}
-
-          {/* Leaderboard */}
-          <div className="hud-panel max-h-40 w-[150px] overflow-y-auto px-2 py-1.5 sm:w-[168px]">
-            <div className="mb-1 text-[8px] font-bold uppercase tracking-widest text-white/30">
-              {mode === "team" ? "Team board" : "Top painters"}
-            </div>
-            {mode === "team" ? (
-              <div className="space-y-0.5">
-                {teamScores.slice(0, 8).map((r) => (
-                  <div
-                    key={r.team}
-                    className={`flex items-center justify-between text-[9px] ${
-                      r.team === team ? "text-sky-200" : "text-white/60"
-                    }`}
-                  >
-                    <span className="font-semibold">{r.team}</span>
-                    <span className="font-mono text-white/40">
-                      {r.pixels}px · {r.score} · {r.percent}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="space-y-0.5">
-                {freeScores.slice(0, 8).map((r) => (
-                  <div
-                    key={r.name}
-                    className={`flex items-center justify-between text-[9px] ${
-                      r.name === name ? "text-amber-200" : "text-white/60"
-                    }`}
-                  >
-                    <span className="max-w-[70px] truncate font-semibold">
-                      {r.name}
-                    </span>
-                    <span className="font-mono text-white/40">
-                      {r.pixels} · {r.score}
-                    </span>
-                  </div>
-                ))}
-                {freeScores.length === 0 && (
-                  <p className="text-[9px] text-white/30">Paint to rank</p>
-                )}
-              </div>
-            )}
-          </div>
         </div>
       </div>
 
@@ -875,35 +1003,51 @@ export default function Home() {
             <div className="flex flex-wrap gap-1">
               {(
                 [
-                  ["paint", "Paint", 1],
-                  ["eraser", "Eraser", 1],
-                  ["bomb", "Bomb 5×5", POWERUPS.bomb.cost],
-                  ["wave", "Wave×10", POWERUPS.wave.cost],
+                  ["paint", "Paint", 1, null as string | null],
+                  ["eraser", "Eraser", 1, null as string | null],
+                  ["bomb", "Bomb 5×5", POWERUPS.bomb.cost, bombCdLabel],
+                  ["wave", "Wave×10", POWERUPS.wave.cost, waveCdLabel],
                 ] as const
-              ).map(([id, label, cost]) => (
+              ).map(([id, label, cost, cd]) => (
                 <button
                   key={id}
                   type="button"
-                  onClick={() => setTool(id)}
+                  onClick={() => {
+                    if (cd) {
+                      showToast(
+                        `${id === "bomb" ? "Bomb" : "Wave"} on cooldown · ${cd}`
+                      );
+                      return;
+                    }
+                    setTool(id);
+                  }}
                   className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                    tool === id
-                      ? "bg-white/15 text-white"
-                      : "text-white/40 hover:text-white/70"
+                    cd
+                      ? "cursor-not-allowed text-white/25 line-through decoration-white/20"
+                      : tool === id
+                        ? "bg-white/15 text-white"
+                        : "text-white/40 hover:text-white/70"
                   }`}
+                  title={cd ? `Cooldown ${cd}` : undefined}
                 >
-                  {label} ·{cost}★
+                  {cd ? `${label} ·${cd}` : `${label} ·${cost}★`}
                 </button>
               ))}
               <button
                 type="button"
                 onClick={activateMultiplier}
                 className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                  multActive
-                    ? "bg-fuchsia-500/30 text-fuchsia-200"
-                    : "text-white/40 hover:text-fuchsia-200/80"
+                  multCdLabel
+                    ? "cursor-not-allowed text-white/25"
+                    : multActive
+                      ? "bg-fuchsia-500/30 text-fuchsia-200"
+                      : "text-white/40 hover:text-fuchsia-200/80"
                 }`}
+                title={multCdLabel ? `Cooldown ${multCdLabel}` : "2× score 20s · 1h CD"}
               >
-                2× ·{POWERUPS.multiplier.cost}★
+                {multCdLabel
+                  ? `2× ·${multCdLabel}`
+                  : `2× ·${POWERUPS.multiplier.cost}★`}
               </button>
             </div>
           </div>
@@ -971,7 +1115,7 @@ export default function Home() {
             )
           )}
           <p className="mt-1.5 text-center text-[8px] text-white/25">
-            Scroll zoom · Drag pan · Stars locked per IP
+            Scroll zoom · Drag pan · Power-ups 1h cooldown
           </p>
         </div>
       </div>

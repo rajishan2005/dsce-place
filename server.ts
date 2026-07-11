@@ -17,12 +17,14 @@ import {
   COLOR_PALETTE,
   TEAMS,
   POWERUPS,
+  POWERUP_COOLDOWN_MS,
   ERASER_COST,
   BASE_SCORE_PER_PIXEL,
   colorForTeam,
   type GameMode,
   type TeamId,
   type WaveDir,
+  type PowerupId,
 } from "./src/lib/config";
 import { bombCells, waveCells } from "./src/lib/gridOps";
 import type {
@@ -149,6 +151,8 @@ interface IpQuota {
   stars: number;
   regenStartedAt: number;
   multiplierUntil: number;
+  /** Epoch ms when each power-up becomes usable again */
+  powerupReadyAt?: Partial<Record<PowerupId, number>>;
 }
 
 function loadQuotas(): Map<string, IpQuota> {
@@ -164,18 +168,33 @@ function loadQuotas(): Map<string, IpQuota> {
     for (const [ip, q] of Object.entries(raw)) {
       if (!q || typeof q !== "object") continue;
       if (typeof q.stars === "number") {
+        const readyRaw =
+          q.powerupReadyAt && typeof q.powerupReadyAt === "object"
+            ? q.powerupReadyAt
+            : {};
         map.set(ip, {
           stars: Math.min(MAX_STARS, Math.max(0, q.stars)),
           regenStartedAt:
             typeof q.regenStartedAt === "number" ? q.regenStartedAt : 0,
           multiplierUntil:
             typeof q.multiplierUntil === "number" ? q.multiplierUntil : 0,
+          powerupReadyAt: {
+            bomb:
+              typeof readyRaw.bomb === "number" ? readyRaw.bomb : 0,
+            wave:
+              typeof readyRaw.wave === "number" ? readyRaw.wave : 0,
+            multiplier:
+              typeof readyRaw.multiplier === "number"
+                ? readyRaw.multiplier
+                : 0,
+          },
         });
       } else if (typeof q.placedCount === "number") {
         map.set(ip, {
           stars: Math.max(0, MAX_STARS - q.placedCount),
           regenStartedAt: 0,
           multiplierUntil: 0,
+          powerupReadyAt: {},
         });
       }
     }
@@ -501,10 +520,56 @@ loadIdentities();
 function getOrCreateQuota(ip: string): IpQuota {
   let q = quotas.get(ip);
   if (!q) {
-    q = { stars: MAX_STARS, regenStartedAt: 0, multiplierUntil: 0 };
+    q = {
+      stars: MAX_STARS,
+      regenStartedAt: 0,
+      multiplierUntil: 0,
+      powerupReadyAt: {},
+    };
     quotas.set(ip, q);
   }
+  if (!q.powerupReadyAt) q.powerupReadyAt = {};
   return q;
+}
+
+function powerupsReadySnapshot(
+  q: IpQuota,
+  now: number
+): { bomb: number; wave: number; multiplier: number } {
+  const r = q.powerupReadyAt || {};
+  return {
+    bomb: typeof r.bomb === "number" && r.bomb > now ? r.bomb : 0,
+    wave: typeof r.wave === "number" && r.wave > now ? r.wave : 0,
+    multiplier:
+      typeof r.multiplier === "number" && r.multiplier > now
+        ? r.multiplier
+        : 0,
+  };
+}
+
+/** Returns remaining seconds if on cooldown, else 0 */
+function powerupCooldownLeft(
+  q: IpQuota,
+  id: PowerupId,
+  now: number
+): number {
+  const ready = q.powerupReadyAt?.[id] ?? 0;
+  if (!ready || ready <= now) return 0;
+  return Math.max(1, Math.ceil((ready - now) / 1000));
+}
+
+function markPowerupUsed(q: IpQuota, id: PowerupId, now: number): void {
+  if (!q.powerupReadyAt) q.powerupReadyAt = {};
+  q.powerupReadyAt[id] = now + POWERUP_COOLDOWN_MS;
+}
+
+function formatCooldown(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function refreshStars(q: IpQuota, now: number): void {
@@ -557,6 +622,9 @@ function quotaSnapshot(
     multiplierUntil: q.multiplierUntil > now ? q.multiplierUntil : 0,
     ipMasked: maskIp(ip),
     isAdmin: admin,
+    powerupsReadyAt: admin
+      ? { bomb: 0, wave: 0, multiplier: 0 }
+      : powerupsReadySnapshot(q, now),
   };
 }
 
@@ -960,6 +1028,19 @@ app.prepare().then(() => {
 
         // ── Multiplier activate ──
         if (tool === "multiplier") {
+          const qPre = getOrCreateQuota(clientIp);
+          if (!isAdminFor(clientIp, deviceId)) {
+            const cd = powerupCooldownLeft(qPre, "multiplier", now);
+            if (cd > 0) {
+              const quota = quotaSnapshot(clientIp, now, deviceId);
+              ack?.({
+                error: `2× on cooldown · ${formatCooldown(cd)} left`,
+                quota,
+              });
+              socket.emit("quota", quota);
+              return;
+            }
+          }
           const spend = trySpendStars(
             clientIp,
             POWERUPS.multiplier.cost,
@@ -976,6 +1057,9 @@ app.prepare().then(() => {
           }
           const q = getOrCreateQuota(clientIp);
           q.multiplierUntil = now + POWERUPS.multiplier.durationMs;
+          if (!isAdminFor(clientIp, deviceId)) {
+            markPowerupUsed(q, "multiplier", now);
+          }
           schedulePersist();
           const quota = quotaSnapshot(clientIp, now, deviceId);
           socket.emit("quota", quota);
@@ -1015,6 +1099,19 @@ app.prepare().then(() => {
         }
 
         if (tool === "bomb") {
+          const qPre = getOrCreateQuota(clientIp);
+          if (!isAdminFor(clientIp, deviceId)) {
+            const cd = powerupCooldownLeft(qPre, "bomb", now);
+            if (cd > 0) {
+              const quota = quotaSnapshot(clientIp, now, deviceId);
+              ack?.({
+                error: `Bomb on cooldown · ${formatCooldown(cd)} left`,
+                quota,
+              });
+              socket.emit("quota", quota);
+              return;
+            }
+          }
           const spend = trySpendStars(clientIp, POWERUPS.bomb.cost, now, deviceId);
           if (!spend.ok) {
             ack?.({
@@ -1023,6 +1120,9 @@ app.prepare().then(() => {
             });
             socket.emit("quota", spend.quota);
             return;
+          }
+          if (!isAdminFor(clientIp, deviceId)) {
+            markPowerupUsed(getOrCreateQuota(clientIp), "bomb", now);
           }
           const cells = bombCells(x, y, POWERUPS.bomb.radius);
           const painted: Pixel[] = [];
@@ -1034,13 +1134,14 @@ app.prepare().then(() => {
           }
           addScore(mode, name, team, totalPts);
           schedulePersist();
+          const quota = quotaSnapshot(clientIp, now, deviceId);
           emitBatch({
             mode,
             pixels: painted,
             fx: { type: "bomb", x, y, color, points: totalPts },
           });
-          socket.emit("quota", spend.quota);
-          ack?.({ ok: true, quota: spend.quota, count: painted.length, points: totalPts });
+          socket.emit("quota", quota);
+          ack?.({ ok: true, quota, count: painted.length, points: totalPts });
           return;
         }
 
@@ -1050,6 +1151,19 @@ app.prepare().then(() => {
             ack?.({ error: "Pick a wave direction." });
             return;
           }
+          const qPre = getOrCreateQuota(clientIp);
+          if (!isAdminFor(clientIp, deviceId)) {
+            const cd = powerupCooldownLeft(qPre, "wave", now);
+            if (cd > 0) {
+              const quota = quotaSnapshot(clientIp, now, deviceId);
+              ack?.({
+                error: `Wave on cooldown · ${formatCooldown(cd)} left`,
+                quota,
+              });
+              socket.emit("quota", quota);
+              return;
+            }
+          }
           const spend = trySpendStars(clientIp, POWERUPS.wave.cost, now, deviceId);
           if (!spend.ok) {
             ack?.({
@@ -1058,6 +1172,9 @@ app.prepare().then(() => {
             });
             socket.emit("quota", spend.quota);
             return;
+          }
+          if (!isAdminFor(clientIp, deviceId)) {
+            markPowerupUsed(getOrCreateQuota(clientIp), "wave", now);
           }
           const cells = waveCells(x, y, dir, POWERUPS.wave.length);
           const painted: Pixel[] = [];
@@ -1069,13 +1186,14 @@ app.prepare().then(() => {
           }
           addScore(mode, name, team, totalPts);
           schedulePersist();
+          const quota = quotaSnapshot(clientIp, now, deviceId);
           emitBatch({
             mode,
             pixels: painted,
             fx: { type: "wave", x, y, color, dir, points: totalPts },
           });
-          socket.emit("quota", spend.quota);
-          ack?.({ ok: true, quota: spend.quota, count: painted.length, points: totalPts });
+          socket.emit("quota", quota);
+          ack?.({ ok: true, quota, count: painted.length, points: totalPts });
           return;
         }
 

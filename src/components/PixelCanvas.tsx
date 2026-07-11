@@ -29,6 +29,10 @@ interface PixelCanvasProps {
   canPlace: boolean;
   tool: ToolPreview;
   waveDir?: "up" | "down" | "left" | "right";
+  /** Force visible cell grid (even when zoomed out) */
+  showGrid?: boolean;
+  /** Satellite map opacity 0–1 (pixels stay full opacity) */
+  mapOpacity?: number;
   onPlace: (x: number, y: number) => void;
   onHover: (pixel: Pixel | null, gridX: number, gridY: number) => void;
 }
@@ -60,6 +64,8 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       canPlace,
       tool,
       waveDir = "right",
+      showGrid = false,
+      mapOpacity = 1,
       onPlace,
       onHover,
     },
@@ -250,17 +256,20 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       ctx.translate(offset.x, offset.y);
       ctx.scale(scale, scale);
 
+      const bgAlpha = Math.max(0, Math.min(1, mapOpacity));
       if (bgRef.current) {
+        ctx.globalAlpha = bgAlpha;
         ctx.drawImage(bgRef.current, 0, 0, gridWidth, gridHeight);
+        ctx.globalAlpha = 1;
       } else {
         ctx.fillStyle = "#1a2332";
         ctx.fillRect(0, 0, gridWidth, gridHeight);
       }
 
-      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.fillStyle = `rgba(0,0,0,${0.12 * bgAlpha})`;
       ctx.fillRect(0, 0, gridWidth, gridHeight);
 
-      // Batched pixel layer
+      // Batched pixel layer (always full opacity)
       ensureLayer();
       if (layerRef.current) {
         ctx.drawImage(layerRef.current, 0, 0);
@@ -309,20 +318,33 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         }
       }
 
-      if (scale >= 10) {
-        ctx.strokeStyle = "rgba(255,255,255,0.05)";
-        ctx.lineWidth = 1 / scale;
+      // Grid lines: auto when very zoomed in, or forced via showGrid
+      const drawGrid = showGrid || scale >= 10;
+      if (drawGrid) {
+        ctx.strokeStyle = showGrid
+          ? "rgba(255,255,255,0.18)"
+          : "rgba(255,255,255,0.05)";
+        ctx.lineWidth = showGrid
+          ? Math.max(1 / scale, 0.04)
+          : 1 / scale;
         const inv = 1 / scale;
         const x0 = Math.max(0, Math.floor(-offset.x * inv) - 1);
         const y0 = Math.max(0, Math.floor(-offset.y * inv) - 1);
         const x1 = Math.min(gridWidth, Math.ceil((w - offset.x) * inv) + 1);
         const y1 = Math.min(gridHeight, Math.ceil((h - offset.y) * inv) + 1);
+        // When zoomed out with showGrid, step every N cells for clarity
+        const step =
+          showGrid && scale < 4
+            ? scale < 1.5
+              ? 10
+              : 5
+            : 1;
         ctx.beginPath();
-        for (let x = x0; x <= x1; x++) {
+        for (let x = x0; x <= x1; x += step) {
           ctx.moveTo(x, y0);
           ctx.lineTo(x, y1);
         }
-        for (let y = y0; y <= y1; y++) {
+        for (let y = y0; y <= y1; y += step) {
           ctx.moveTo(x0, y);
           ctx.lineTo(x1, y);
         }
@@ -407,6 +429,8 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       canPlace,
       tool,
       waveDir,
+      showGrid,
+      mapOpacity,
       ensureLayer,
     ]);
 
@@ -686,8 +710,8 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
             scheduleDraw();
           }}
           onDoubleClick={(e) => {
+            // Prevent browser / canvas zoom-out on double-tap
             e.preventDefault();
-            fitMap("cover");
           }}
         />
       </div>
