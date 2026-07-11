@@ -5,11 +5,13 @@ import { io, Socket } from "socket.io-client";
 import NameGate from "@/components/NameGate";
 import PixelCanvas, { type PixelCanvasHandle } from "@/components/PixelCanvas";
 import ColorPalette from "@/components/ColorPalette";
+import ToolIconButton from "@/components/ToolIconButton";
 import {
   COLOR_PALETTE,
   GRID_HEIGHT,
   GRID_WIDTH,
   MAX_STARS,
+  POWERUP_COOLDOWN_MS,
   POWERUPS,
   REGEN_SECONDS,
   TEAMS,
@@ -53,6 +55,22 @@ function formatPowerupCd(readyAt: number, now: number): string | null {
   if (m > 0) return `${m}m`;
   return `${s}s`;
 }
+
+/** 0 = just used (grey), 1 = ready (full color) */
+function powerupFill(readyAt: number, now: number): number {
+  if (!readyAt || readyAt <= now) return 1;
+  const left = readyAt - now;
+  const fill = 1 - left / POWERUP_COOLDOWN_MS;
+  return Math.max(0, Math.min(1, fill));
+}
+
+const TOOL_ICONS = {
+  paint: "/icons/paint.png",
+  eraser: "/icons/eraser.png",
+  bomb: "/icons/bomb.png",
+  wave: "/icons/wave.png",
+  multiplier: "/icons/multiplier.png",
+} as const;
 
 function getOrCreateDeviceId(): string {
   try {
@@ -152,7 +170,7 @@ export default function Home() {
     setReady(true);
   }, []);
 
-  // Multiplier + power-up cooldown ticks
+  // Multiplier + power-up cooldown ticks (smooth refill animation)
   useEffect(() => {
     const anyCd =
       multiplierUntil > Date.now() ||
@@ -160,7 +178,8 @@ export default function Home() {
       powerupsReadyAt.wave > Date.now() ||
       powerupsReadyAt.multiplier > Date.now();
     if (!anyCd) return;
-    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    // ~4fps is enough for hour-long refill without wasting battery
+    const t = setInterval(() => setNowTick(Date.now()), 250);
     return () => clearInterval(t);
   }, [multiplierUntil, powerupsReadyAt]);
 
@@ -995,60 +1014,76 @@ export default function Home() {
 
       {/* BOTTOM tools + palette */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-2.5 sm:p-3">
-        <div className="pointer-events-auto hud-panel max-w-[min(100%,620px)] px-2.5 py-2">
-          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 px-0.5">
+        <div className="pointer-events-auto hud-panel max-w-[min(100%,640px)] px-2.5 py-2">
+          <div className="mb-1.5 flex flex-col gap-1.5 px-0.5">
             <span className="text-[8px] font-bold uppercase tracking-[0.2em] text-white/35">
               Tools
             </span>
-            <div className="flex flex-wrap gap-1">
-              {(
-                [
-                  ["paint", "Paint", 1, null as string | null],
-                  ["eraser", "Eraser", 1, null as string | null],
-                  ["bomb", "Bomb 5×5", POWERUPS.bomb.cost, bombCdLabel],
-                  ["wave", "Wave×10", POWERUPS.wave.cost, waveCdLabel],
-                ] as const
-              ).map(([id, label, cost, cd]) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => {
-                    if (cd) {
-                      showToast(
-                        `${id === "bomb" ? "Bomb" : "Wave"} on cooldown · ${cd}`
-                      );
-                      return;
-                    }
-                    setTool(id);
-                  }}
-                  className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                    cd
-                      ? "cursor-not-allowed text-white/25 line-through decoration-white/20"
-                      : tool === id
-                        ? "bg-white/15 text-white"
-                        : "text-white/40 hover:text-white/70"
-                  }`}
-                  title={cd ? `Cooldown ${cd}` : undefined}
-                >
-                  {cd ? `${label} ·${cd}` : `${label} ·${cost}★`}
-                </button>
-              ))}
-              <button
-                type="button"
+            <div className="flex flex-wrap items-end justify-center gap-1.5">
+              <ToolIconButton
+                iconSrc={TOOL_ICONS.paint}
+                label="Paint"
+                cost={1}
+                selected={tool === "paint"}
+                fill={1}
+                onClick={() => setTool("paint")}
+              />
+              <ToolIconButton
+                iconSrc={TOOL_ICONS.eraser}
+                label="Eraser"
+                cost={1}
+                selected={tool === "eraser"}
+                fill={1}
+                onClick={() => setTool("eraser")}
+              />
+              <ToolIconButton
+                iconSrc={TOOL_ICONS.bomb}
+                label="Bomb"
+                cost={POWERUPS.bomb.cost}
+                selected={tool === "bomb"}
+                fill={
+                  isAdmin ? 1 : powerupFill(powerupsReadyAt.bomb, nowTick)
+                }
+                cdLabel={isAdmin ? null : bombCdLabel}
+                onClick={() => {
+                  if (!isAdmin && bombCdLabel) {
+                    showToast(`Bomb on cooldown · ${bombCdLabel}`);
+                    return;
+                  }
+                  setTool("bomb");
+                }}
+              />
+              <ToolIconButton
+                iconSrc={TOOL_ICONS.wave}
+                label="Wave"
+                cost={POWERUPS.wave.cost}
+                selected={tool === "wave"}
+                fill={
+                  isAdmin ? 1 : powerupFill(powerupsReadyAt.wave, nowTick)
+                }
+                cdLabel={isAdmin ? null : waveCdLabel}
+                onClick={() => {
+                  if (!isAdmin && waveCdLabel) {
+                    showToast(`Wave on cooldown · ${waveCdLabel}`);
+                    return;
+                  }
+                  setTool("wave");
+                }}
+              />
+              <ToolIconButton
+                iconSrc={TOOL_ICONS.multiplier}
+                label="2×"
+                cost={POWERUPS.multiplier.cost}
+                selected={false}
+                active={multActive}
+                fill={
+                  isAdmin
+                    ? 1
+                    : powerupFill(powerupsReadyAt.multiplier, nowTick)
+                }
+                cdLabel={isAdmin ? null : multCdLabel}
                 onClick={activateMultiplier}
-                className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                  multCdLabel
-                    ? "cursor-not-allowed text-white/25"
-                    : multActive
-                      ? "bg-fuchsia-500/30 text-fuchsia-200"
-                      : "text-white/40 hover:text-fuchsia-200/80"
-                }`}
-                title={multCdLabel ? `Cooldown ${multCdLabel}` : "2× score 20s · 1h CD"}
-              >
-                {multCdLabel
-                  ? `2× ·${multCdLabel}`
-                  : `2× ·${POWERUPS.multiplier.cost}★`}
-              </button>
+              />
             </div>
           </div>
 
