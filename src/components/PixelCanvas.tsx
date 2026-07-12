@@ -335,7 +335,6 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.imageSmoothingEnabled = false;
 
       const scale = scaleRef.current;
       const offset = offsetRef.current;
@@ -343,22 +342,34 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       ctx.fillStyle = "#070b14";
       ctx.fillRect(0, 0, w, h);
 
+      const bgAlpha = Math.max(0, Math.min(1, mapOpacity));
+      const mapW = gridWidth * scale;
+      const mapH = gridHeight * scale;
+
+      // Draw map in *screen* space with high-quality filtering.
+      // (Grid-space draw + imageSmoothingEnabled=false was crushing detail.)
+      if (bgRef.current) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.globalAlpha = bgAlpha;
+        ctx.drawImage(bgRef.current, offset.x, offset.y, mapW, mapH);
+        ctx.restore();
+        // Light dim so painted pixels pop — keep low so map stays clear
+        if (bgAlpha > 0) {
+          ctx.fillStyle = `rgba(0,0,0,${0.04 * bgAlpha})`;
+          ctx.fillRect(offset.x, offset.y, mapW, mapH);
+        }
+      } else {
+        ctx.fillStyle = "#1a2332";
+        ctx.fillRect(offset.x, offset.y, mapW, mapH);
+      }
+
+      // Pixel art + FX stay in grid space, nearest-neighbor (crisp cells)
       ctx.save();
       ctx.translate(offset.x, offset.y);
       ctx.scale(scale, scale);
-
-      const bgAlpha = Math.max(0, Math.min(1, mapOpacity));
-      if (bgRef.current) {
-        ctx.globalAlpha = bgAlpha;
-        ctx.drawImage(bgRef.current, 0, 0, gridWidth, gridHeight);
-        ctx.globalAlpha = 1;
-      } else {
-        ctx.fillStyle = "#1a2332";
-        ctx.fillRect(0, 0, gridWidth, gridHeight);
-      }
-
-      ctx.fillStyle = `rgba(0,0,0,${0.12 * bgAlpha})`;
-      ctx.fillRect(0, 0, gridWidth, gridHeight);
+      ctx.imageSmoothingEnabled = false;
 
       // Batched pixel layer (always full opacity)
       ensureLayer();
