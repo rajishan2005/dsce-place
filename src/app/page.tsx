@@ -359,7 +359,15 @@ export default function Home() {
         return next;
       });
       setPixelsRevision((n) => n + 1);
-      if (batch.fx) canvasRef.current?.spawnFx(batch.fx);
+      if (batch.fx) {
+        // Network FX: color drop / blast only — never +score floaters for others
+        canvasRef.current?.spawnFx({
+          ...batch.fx,
+          showPoints: false,
+          points: 0,
+          drop: true,
+        });
+      }
     });
 
     s.on("scores", (s: ScoresUpdate) => {
@@ -526,16 +534,18 @@ export default function Home() {
         setNextStarIn((prev) => (prev > 0 ? prev : regenSeconds));
       }
       if (tool === "paint") {
+        // Local-only +1/+2; drop comes from server broadcast for everyone
         canvasRef.current?.spawnFx({
           type: "paint",
           x,
           y,
           color: activeColor,
           points: multiplierUntil > Date.now() ? 2 : 1,
+          showPoints: true,
+          drop: false,
         });
-      } else if (tool === "eraser") {
-        canvasRef.current?.spawnFx({ type: "erase", x, y, points: 0 });
       }
+      // Eraser / bomb / wave drops come from the server so all clients match
 
       socket.emit(
         "action",
@@ -557,6 +567,23 @@ export default function Home() {
         }) => {
           if (res?.quota) applyQuota(res.quota);
           if (res?.error) showToast(res.error);
+          // Local-only score float for power-ups (others never see +N)
+          if (
+            res?.ok &&
+            res.points &&
+            res.points > 0 &&
+            (tool === "bomb" || tool === "wave")
+          ) {
+            canvasRef.current?.spawnFx({
+              type: tool,
+              x,
+              y,
+              color: activeColor,
+              points: res.points,
+              showPoints: true,
+              drop: false,
+            });
+          }
         }
       );
     },

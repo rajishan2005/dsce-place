@@ -1138,7 +1138,8 @@ app.prepare().then(() => {
           emitBatch({
             mode,
             pixels: painted,
-            fx: { type: "bomb", x, y, color, points: totalPts },
+            // points omitted on broadcast — only the actor shows +score locally
+            fx: { type: "bomb", x, y, color },
           });
           socket.emit("quota", quota);
           ack?.({ ok: true, quota, count: painted.length, points: totalPts });
@@ -1190,7 +1191,7 @@ app.prepare().then(() => {
           emitBatch({
             mode,
             pixels: painted,
-            fx: { type: "wave", x, y, color, dir, points: totalPts },
+            fx: { type: "wave", x, y, color, dir },
           });
           socket.emit("quota", quota);
           ack?.({ ok: true, quota, count: painted.length, points: totalPts });
@@ -1218,7 +1219,8 @@ app.prepare().then(() => {
         emitBatch({
           mode,
           pixels: [pixel],
-          fx: { type: "paint", x, y, color, points: pts },
+          // No points on broadcast — painter sees +N from their own client only
+          fx: { type: "paint", x, y, color },
         });
         socket.emit("quota", spend.quota);
         ack?.({ ok: true, pixel, quota: spend.quota, points: pts });

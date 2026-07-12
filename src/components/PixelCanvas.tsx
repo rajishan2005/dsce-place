@@ -45,12 +45,16 @@ interface FxParticle {
   y: number;
   born: number;
   life: number; // ms
-  kind: "plus" | "splash" | "ring" | "wave";
+  kind: "plus" | "splash" | "ring" | "wave" | "drop";
   color: string;
   points: number;
   vx?: number;
   vy?: number;
   dir?: "up" | "down" | "left" | "right";
+  /** Drop: start height above target (grid units) */
+  dropFrom?: number;
+  /** Drop / splash radius scale */
+  size?: number;
 }
 
 const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
@@ -146,52 +150,137 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
     const spawnFx = useCallback((fx: NonNullable<PixelsBatchEvent["fx"]>) => {
       const now = performance.now();
       const color = fx.color || selectedColor;
-      const points = fx.points ?? 1;
+      const points = fx.points ?? 0;
+      const showPoints = Boolean(fx.showPoints) && points > 0;
+      // Default: drop for paint/bomb unless explicitly false
+      const wantDrop =
+        fx.drop !== false &&
+        (fx.type === "paint" || fx.type === "bomb" || fx.type === "erase");
 
       if (fx.type === "paint" || fx.type === "erase") {
-        fxRef.current.push({
-          x: fx.x + 0.5,
-          y: fx.y + 0.5,
-          born: now,
-          life: 1000,
-          kind: "plus",
-          color: fx.type === "erase" ? "#94a3b8" : color,
-          points: fx.type === "erase" ? 0 : points,
-        });
-        // few splash dots
-        for (let i = 0; i < 6; i++) {
-          const a = (Math.PI * 2 * i) / 6 + Math.random() * 0.4;
+        // +N only for the local painter
+        if (showPoints && fx.type === "paint") {
           fxRef.current.push({
             x: fx.x + 0.5,
             y: fx.y + 0.5,
             born: now,
-            life: 450 + Math.random() * 200,
-            kind: "splash",
+            life: 1000,
+            kind: "plus",
             color,
-            points: 0,
-            vx: Math.cos(a) * (0.8 + Math.random()),
-            vy: Math.sin(a) * (0.8 + Math.random()),
+            points,
           });
         }
+
+        if (wantDrop) {
+          // Ink drop landing on the cell
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now,
+            life: 520,
+            kind: "drop",
+            color: fx.type === "erase" ? "#94a3b8" : color,
+            points: 0,
+            dropFrom: 2.4,
+            size: 0.55,
+          });
+          // Splash on impact
+          for (let i = 0; i < 7; i++) {
+            const a = (Math.PI * 2 * i) / 7 + Math.random() * 0.35;
+            fxRef.current.push({
+              x: fx.x + 0.5,
+              y: fx.y + 0.5,
+              born: now + 280,
+              life: 400 + Math.random() * 180,
+              kind: "splash",
+              color: fx.type === "erase" ? "#94a3b8" : color,
+              points: 0,
+              vx: Math.cos(a) * (0.9 + Math.random() * 0.6),
+              vy: Math.sin(a) * (0.9 + Math.random() * 0.6),
+            });
+          }
+        }
       } else if (fx.type === "bomb") {
-        fxRef.current.push({
-          x: fx.x + 0.5,
-          y: fx.y + 0.5,
-          born: now,
-          life: 700,
-          kind: "ring",
-          color,
-          points,
-        });
-        fxRef.current.push({
-          x: fx.x + 0.5,
-          y: fx.y + 0.5,
-          born: now,
-          life: 1000,
-          kind: "plus",
-          color,
-          points,
-        });
+        if (wantDrop) {
+          // Big central ink bomb drop
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now,
+            life: 780,
+            kind: "drop",
+            color,
+            points: 0,
+            dropFrom: 7.5,
+            size: 2.4,
+          });
+          // Secondary drops around the 5×5 blast
+          for (let i = 0; i < 8; i++) {
+            const a = (Math.PI * 2 * i) / 8 + Math.random() * 0.2;
+            const r = 1.2 + Math.random() * 1.4;
+            fxRef.current.push({
+              x: fx.x + 0.5 + Math.cos(a) * r,
+              y: fx.y + 0.5 + Math.sin(a) * r,
+              born: now + 40 + i * 25,
+              life: 620 + Math.random() * 120,
+              kind: "drop",
+              color,
+              points: 0,
+              dropFrom: 4 + Math.random() * 3,
+              size: 0.85 + Math.random() * 0.45,
+            });
+          }
+          // Expanding shock rings
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now + 320,
+            life: 900,
+            kind: "ring",
+            color,
+            points: 0,
+            size: 1.4,
+          });
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now + 420,
+            life: 700,
+            kind: "ring",
+            color,
+            points: 0,
+            size: 0.9,
+          });
+          // Impact splash burst
+          for (let i = 0; i < 16; i++) {
+            const a = (Math.PI * 2 * i) / 16 + Math.random() * 0.25;
+            const speed = 1.6 + Math.random() * 1.8;
+            fxRef.current.push({
+              x: fx.x + 0.5,
+              y: fx.y + 0.5,
+              born: now + 360,
+              life: 500 + Math.random() * 250,
+              kind: "splash",
+              color,
+              points: 0,
+              vx: Math.cos(a) * speed,
+              vy: Math.sin(a) * speed,
+              size: 0.35,
+            });
+          }
+        }
+        // Local score only
+        if (showPoints) {
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now + 350,
+            life: 1100,
+            kind: "plus",
+            color,
+            points,
+          });
+        }
       } else if (fx.type === "wave") {
         fxRef.current.push({
           x: fx.x + 0.5,
@@ -200,23 +289,25 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
           life: 800,
           kind: "wave",
           color,
-          points,
+          points: 0,
           dir: fx.dir,
         });
-        fxRef.current.push({
-          x: fx.x + 0.5,
-          y: fx.y + 0.5,
-          born: now,
-          life: 1000,
-          kind: "plus",
-          color,
-          points,
-        });
+        if (showPoints) {
+          fxRef.current.push({
+            x: fx.x + 0.5,
+            y: fx.y + 0.5,
+            born: now,
+            life: 1000,
+            kind: "plus",
+            color,
+            points,
+          });
+        }
       }
 
       // Cap FX for perf
-      if (fxRef.current.length > 80) {
-        fxRef.current = fxRef.current.slice(-60);
+      if (fxRef.current.length > 140) {
+        fxRef.current = fxRef.current.slice(-100);
       }
       startAnimLoop();
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -360,6 +451,11 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       const alive: FxParticle[] = [];
       for (const p of fxRef.current) {
         const t = (now - p.born) / p.life;
+        // born can be in the future (staggered bomb/splash)
+        if (t < 0) {
+          alive.push(p);
+          continue;
+        }
         if (t >= 1) continue;
         alive.push(p);
         const alpha = 1 - t;
@@ -378,22 +474,66 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
           ctx.strokeText(label, 0, 0);
           ctx.fillText(label, 0, 0);
           ctx.restore();
+        } else if (p.kind === "drop") {
+          // Fall with ease-in, then soft impact squash
+          const fallT = Math.min(1, t / 0.72);
+          const ease = fallT * fallT;
+          const from = p.dropFrom ?? 2.5;
+          const size = p.size ?? 0.55;
+          const cy = p.y - from + from * ease;
+          const squash = fallT > 0.92 ? 1 + (fallT - 0.92) * 4 : 1;
+          const rx = size * 0.42 * squash;
+          const ry = size * 0.55 * (2 - squash);
+          ctx.save();
+          ctx.globalAlpha = Math.min(1, alpha * 1.15);
+          ctx.fillStyle = p.color;
+          // teardrop body
+          ctx.beginPath();
+          ctx.ellipse(p.x, cy, rx, ry, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // highlight
+          ctx.globalAlpha = alpha * 0.35;
+          ctx.fillStyle = "#ffffff";
+          ctx.beginPath();
+          ctx.ellipse(
+            p.x - rx * 0.25,
+            cy - ry * 0.25,
+            rx * 0.28,
+            ry * 0.22,
+            0,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+          // impact ripple near landing
+          if (fallT > 0.78) {
+            const k = (fallT - 0.78) / 0.22;
+            ctx.globalAlpha = (1 - k) * 0.55;
+            ctx.strokeStyle = p.color;
+            ctx.lineWidth = 0.12;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, size * (0.35 + k * 1.4), 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          ctx.restore();
         } else if (p.kind === "splash") {
           const px = p.x + (p.vx || 0) * t * 1.5;
           const py = p.y + (p.vy || 0) * t * 1.5;
           ctx.globalAlpha = alpha * 0.85;
           ctx.fillStyle = p.color;
-          const r = 0.22 * (1 - t * 0.5);
+          const base = p.size ?? 0.22;
+          const r = base * (1 - t * 0.5);
           ctx.beginPath();
           ctx.arc(px, py, r, 0, Math.PI * 2);
           ctx.fill();
           ctx.globalAlpha = 1;
         } else if (p.kind === "ring") {
-          ctx.globalAlpha = alpha * 0.7;
+          const grow = p.size ?? 1;
+          ctx.globalAlpha = alpha * 0.75;
           ctx.strokeStyle = p.color;
-          ctx.lineWidth = 0.25;
+          ctx.lineWidth = 0.2 * grow;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 0.5 + t * 4, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, (0.5 + t * 5) * grow, 0, Math.PI * 2);
           ctx.stroke();
           ctx.globalAlpha = 1;
         } else if (p.kind === "wave") {

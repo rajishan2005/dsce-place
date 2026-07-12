@@ -99,7 +99,12 @@ export interface PixelsBatchEvent {
     y: number;
     color?: string;
     dir?: WaveDir;
+    /** Score floater — only the acting client should set this true */
     points?: number;
+    /** When true, show +N (local player only). Network FX leave this false. */
+    showPoints?: boolean;
+    /** Drop / impact animation. Default true for paint/bomb. */
+    drop?: boolean;
   };
 }
 
