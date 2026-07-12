@@ -616,7 +616,8 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
 
     useEffect(() => {
       const img = new Image();
-      img.src = "/campus-satellite.jpg";
+      // Prefer high-quality PNG when present; jpg is fallback
+      img.src = "/campus-satellite.png";
       img.onload = () => {
         bgRef.current = img;
         scheduleDraw();
