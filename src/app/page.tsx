@@ -99,7 +99,9 @@ export default function Home() {
   const [deviceId, setDeviceId] = useState<string>("");
   const [pixels, setPixels] = useState<Map<string, Pixel>>(() => new Map());
   const [pixelsRevision, setPixelsRevision] = useState(0);
-  const [selectedColor, setSelectedColor] = useState<string>(COLOR_PALETTE[6]);
+  /** Free mode: null until user picks from the palette */
+  const [selectedColor, setSelectedColor] = useState<string | null>(null);
+  const [paletteNudge, setPaletteNudge] = useState(false);
   const [tool, setTool] = useState<ToolId>("paint");
   const [waveDir, setWaveDir] = useState<WaveDir>("right");
   const [stars, setStars] = useState(MAX_STARS);
@@ -139,7 +141,7 @@ export default function Home() {
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
-  /** Active paint color: team lock in team mode */
+  /** Active paint color: team lock in team mode; free mode only after pick */
   const activeColor = useMemo(() => {
     if (mode === "team" && team) return colorForTeam(team);
     return selectedColor;
@@ -505,6 +507,20 @@ export default function Home() {
   const handlePlace = useCallback(
     (x: number, y: number) => {
       if (!socket || !name) return;
+
+      // Free mode paint tools require a chosen color — no star spend until then
+      if (
+        mode === "free" &&
+        (tool === "paint" || tool === "bomb" || tool === "wave") &&
+        !selectedColor
+      ) {
+        setHudOpen(true);
+        setPaletteNudge(true);
+        window.setTimeout(() => setPaletteNudge(false), 1200);
+        showToast("Pick a color first");
+        return;
+      }
+
       if (!isAdmin) {
         if (tool === "bomb" && powerupsReadyAt.bomb > Date.now()) {
           showToast(
@@ -533,7 +549,7 @@ export default function Home() {
         setStars((prev) => Math.max(0, prev - 1));
         setNextStarIn((prev) => (prev > 0 ? prev : regenSeconds));
       }
-      if (tool === "paint") {
+      if (tool === "paint" && activeColor) {
         // Local-only +1/+2; drop comes from server broadcast for everyone
         canvasRef.current?.spawnFx({
           type: "paint",
@@ -552,7 +568,7 @@ export default function Home() {
         {
           x,
           y,
-          color: activeColor,
+          color: activeColor || "",
           name,
           mode,
           team,
@@ -566,12 +582,23 @@ export default function Home() {
           points?: number;
         }) => {
           if (res?.quota) applyQuota(res.quota);
-          if (res?.error) showToast(res.error);
+          if (res?.error) {
+            // Refund optimistic star if server rejected (e.g. bad color)
+            if (
+              !isAdmin &&
+              (tool === "paint" || tool === "eraser") &&
+              res.error.toLowerCase().includes("color")
+            ) {
+              setStars((prev) => Math.min(maxStars, prev + 1));
+            }
+            showToast(res.error);
+          }
           // Local-only score float for power-ups (others never see +N)
           if (
             res?.ok &&
             res.points &&
             res.points > 0 &&
+            activeColor &&
             (tool === "bomb" || tool === "wave")
           ) {
             canvasRef.current?.spawnFx({
@@ -595,12 +622,14 @@ export default function Home() {
       nextStarIn,
       tool,
       activeColor,
+      selectedColor,
       mode,
       team,
       waveDir,
       regenSeconds,
       multiplierUntil,
       isAdmin,
+      maxStars,
       powerupsReadyAt,
       showToast,
       applyQuota,
@@ -649,7 +678,9 @@ export default function Home() {
     status === "live" &&
     (isAdmin || stars >= toolCost) &&
     tool !== "multiplier" &&
-    !toolOnCooldown;
+    !toolOnCooldown &&
+    // Free paint tools need a color — still allow click so we can nudge palette
+    true;
 
   const redeemAdminPrompt = () => {
     if (!socket) return;
@@ -761,7 +792,7 @@ export default function Home() {
         gridHeight={grid.h}
         pixels={pixels}
         pixelsRevision={pixelsRevision}
-        selectedColor={activeColor}
+        selectedColor={activeColor || "#FFFFFF"}
         canPlace={canPlace}
         tool={tool === "multiplier" ? "paint" : tool}
         waveDir={waveDir}
@@ -1134,13 +1165,28 @@ export default function Home() {
           )}
 
           <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-            <span className="text-[8px] font-bold uppercase tracking-[0.2em] text-white/35">
-              {mode === "team" ? "Team color" : "Color"}
+            <span
+              className={`text-[8px] font-bold uppercase tracking-[0.2em] ${
+                paletteNudge ? "text-amber-300" : "text-white/35"
+              }`}
+            >
+              {mode === "team"
+                ? "Team color"
+                : selectedColor
+                  ? "Color"
+                  : "Pick a color"}
             </span>
             <div className="flex items-center gap-1.5">
               <span
-                className="h-3.5 w-3.5 rounded-sm border border-white/40"
-                style={{ backgroundColor: activeColor }}
+                className={`h-3.5 w-3.5 rounded-sm border ${
+                  selectedColor || (mode === "team" && team)
+                    ? "border-white/40"
+                    : "border-dashed border-amber-400/50 bg-transparent"
+                }`}
+                style={{
+                  backgroundColor:
+                    activeColor || "transparent",
+                }}
               />
               {mode === "free" && (
                 <button
@@ -1167,12 +1213,16 @@ export default function Home() {
               </div>
             </div>
           ) : (
-            hudOpen && (
+            (hudOpen || paletteNudge) && (
               <ColorPalette
                 colors={palette}
                 selected={selectedColor}
-                onSelect={setSelectedColor}
+                onSelect={(c) => {
+                  setSelectedColor(c);
+                  setPaletteNudge(false);
+                }}
                 compact
+                highlight={paletteNudge}
               />
             )
           )}

@@ -37,8 +37,9 @@ interface PixelCanvasProps {
   onHover: (pixel: Pixel | null, gridX: number, gridY: number) => void;
 }
 
-const MIN_SCALE = 0.5;
 const MAX_SCALE = 48;
+/** Absolute floor only if container not ready — real min is "fit whole map" */
+const ABS_MIN_SCALE = 0.05;
 
 interface FxParticle {
   x: number; // grid
@@ -630,6 +631,22 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
       // when revision changes, full rebuild already handled
     }, [pixelsRevision]);
 
+    /** Smallest zoom where the entire map still fits on screen */
+    const minFitScale = useCallback(() => {
+      const container = containerRef.current;
+      if (!container) return ABS_MIN_SCALE;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w < 1 || h < 1) return ABS_MIN_SCALE;
+      // Full map visible with a tiny margin — no zooming out past this
+      return Math.min(w / gridWidth, h / gridHeight) * 0.98;
+    }, [gridWidth, gridHeight]);
+
+    const clampScale = useCallback(
+      (s: number) => Math.min(MAX_SCALE, Math.max(minFitScale(), s)),
+      [minFitScale]
+    );
+
     const fitMap = useCallback(
       (mode: "contain" | "cover" = "cover") => {
         const container = containerRef.current;
@@ -640,15 +657,15 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         const s =
           mode === "cover"
             ? Math.max(w / gridWidth, h / gridHeight)
-            : Math.min(w / gridWidth, h / gridHeight) * 0.98;
-        scaleRef.current = Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+            : minFitScale();
+        scaleRef.current = clampScale(s);
         offsetRef.current = {
           x: (w - gridWidth * scaleRef.current) / 2,
           y: (h - gridHeight * scaleRef.current) / 2,
         };
         scheduleDraw();
       },
-      [gridWidth, gridHeight, scheduleDraw]
+      [gridWidth, gridHeight, scheduleDraw, minFitScale, clampScale]
     );
 
     const centerOn = useCallback(
@@ -656,7 +673,7 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         const container = containerRef.current;
         if (!container) return;
         if (zoom != null) {
-          scaleRef.current = Math.min(MAX_SCALE, Math.max(MIN_SCALE, zoom));
+          scaleRef.current = clampScale(zoom);
         }
         const s = scaleRef.current;
         offsetRef.current = {
@@ -665,7 +682,7 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         };
         scheduleDraw();
       },
-      [scheduleDraw]
+      [scheduleDraw, clampScale]
     );
 
     useImperativeHandle(
@@ -681,18 +698,22 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         if (!fittedRef.current) {
           fitMap("cover");
           fittedRef.current = true;
-        } else scheduleDraw();
+        } else {
+          // Keep scale within [fit-whole-map, max] when window resizes
+          scaleRef.current = clampScale(scaleRef.current);
+          scheduleDraw();
+        }
       });
       ro.observe(container);
       fitMap("cover");
       fittedRef.current = true;
       return () => ro.disconnect();
-    }, [fitMap, scheduleDraw]);
+    }, [fitMap, scheduleDraw, clampScale]);
 
     const zoomAt = useCallback(
       (mx: number, my: number, factor: number) => {
         const old = scaleRef.current;
-        const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, old * factor));
+        const next = clampScale(old * factor);
         if (next === old) return;
         const ratio = next / old;
         const o = offsetRef.current;
@@ -703,7 +724,7 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         scaleRef.current = next;
         scheduleDraw();
       },
-      [scheduleDraw]
+      [scheduleDraw, clampScale]
     );
 
     useEffect(() => {
@@ -782,10 +803,7 @@ const PixelCanvas = forwardRef<PixelCanvasHandle, PixelCanvasProps>(
         const mid = pointerMid();
         const p = pinchRef.current;
         if (p.startDist > 0) {
-          const target = Math.min(
-            MAX_SCALE,
-            Math.max(MIN_SCALE, p.startScale * (dist / p.startDist))
-          );
+          const target = clampScale(p.startScale * (dist / p.startDist));
           const ratio = target / scaleRef.current;
           const o = offsetRef.current;
           offsetRef.current = {
